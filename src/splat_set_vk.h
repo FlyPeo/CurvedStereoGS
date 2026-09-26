@@ -32,7 +32,7 @@
 #include <nvvk/resource_allocator.hpp>
 #include <nvvk/physical_device.hpp>
 
-#include "../shaders/shaderio.h"  // For SplatSetDesc
+#include "shaders/shaderio.h"  // For SplatSetDesc
 #include "acceleration_structures_lb.hpp"
 #include "splat_set.h"
 #include "utilities.h"

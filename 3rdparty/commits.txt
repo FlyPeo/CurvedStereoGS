@@ -1,3 +1,0 @@
-vrdx     c4ce1c3688bad92d23c15afd729842054af19ad0 - modified CMakeLists.txt and code
-miniply  1a235c70390fadf789695c9ccbf285ae712416b3
-spz      b39fe5b90083d520ab77a5f9dcbf6e19c861bf05 - modified CMakeLists.txt

@@ -22,7 +22,9 @@ The four-buffer path remains available; the Vulkan path is an alternative for ma
 | `src/gaussian_splatting.cpp` | Rendering, Multiview targets, curved-screen processing |
 | `src/active_stereo_presenter.cpp` | WGL quad-buffer presentation |
 | `src/stereo_interop_vk.cpp` | Vulkan/OpenGL shared-image interop |
-| `qt/qt_control_center.cpp` | Qt control panel and renderer process management |
+| `src/qt/qt_control_center.cpp` | Qt control panel and renderer process management |
+| `src/shaders/` | Vulkan/Slang shaders and shared shader headers |
+| `third_party/` | Vendored build dependencies and their license files |
 | `src/curved_stereo_gs_project_*.cpp` | `.csgs` scene project serialization |
 
 New projects are written as `.csgs`. Loading legacy `.vkgs` project files remains supported.

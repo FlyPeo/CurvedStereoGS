@@ -17,7 +17,7 @@ CMakeFiles/
 *.ini
 
 # Generated shader headers and dependency files
-/3rdparty/vrdx/src/generated/
+/third_party/vrdx/src/generated/
 
 # Scenes and user projects may be large or privately licensed.
 /models/*

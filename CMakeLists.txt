@@ -29,11 +29,11 @@ if (NOT DISABLE_DEFAULT_SCENE)
 endif()
 
 #####################################################################################
-# additions of 3rdparty
+# Third-party libraries
 
 #####
 # Include Vulkan Radix Sort
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/vrdx)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/vrdx)
 
 set_property(TARGET vk_radix_sort PROPERTY FOLDER "ThirdParty/vrdx")
 set_property(TARGET spine_slang PROPERTY FOLDER "ThirdParty/vrdx")
@@ -43,15 +43,15 @@ set_property(TARGET upsweep_slang PROPERTY FOLDER "ThirdParty/vrdx")
 
 #####
 # Include spz (uses zlib from nvpro_core2)
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/spz)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/third_party/spz)
 set_property(TARGET spz PROPERTY FOLDER "ThirdParty")
 
 #####################################################################################
 # Source files for this project
 #
 file(GLOB SOURCE_FILES src/*.*)
-file(GLOB SHADER_FILES shaders/*.slang shaders/*.h)
-file(GLOB EXTERN_FILES 3rdparty/miniply/*.*)
+file(GLOB SHADER_FILES src/shaders/*.slang src/shaders/*.h)
+file(GLOB EXTERN_FILES third_party/miniply/*.*)
 
 list(REMOVE_ITEM SOURCE_FILES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/test.cpp
@@ -98,10 +98,10 @@ list(REMOVE_ITEM CURVED_STEREO_GS_TEST_SOURCE_FILES
 
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/src 
-  ${CMAKE_CURRENT_SOURCE_DIR}/shaders 
-  ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/miniply
-  ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/vrdx
-  ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/spz/src/cc)
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/miniply
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/vrdx
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/spz/src/cc)
 
 #####################################################################################
 # Executable
@@ -255,7 +255,7 @@ option(CURVED_STEREO_GS_BUILD_QT_CONTROL_CENTER "Build the Qt control center for
 if(CURVED_STEREO_GS_BUILD_QT_CONTROL_CENTER)
   find_package(Qt6 6.5 QUIET COMPONENTS Widgets)
   if(Qt6_FOUND)
-    add_executable(CurvedStereoGS_ControlCenter WIN32 qt/qt_control_center.cpp)
+    add_executable(CurvedStereoGS_ControlCenter WIN32 src/qt/qt_control_center.cpp)
     target_compile_features(CurvedStereoGS_ControlCenter PRIVATE cxx_std_20)
     target_link_libraries(CurvedStereoGS_ControlCenter PRIVATE Qt6::Widgets)
     add_dependencies(CurvedStereoGS_ControlCenter ${CURVED_STEREO_GS_RENDERER_TARGET})
@@ -331,34 +331,34 @@ endif()
 copy_to_runtime_and_install(${CURVED_STEREO_GS_RENDERER_TARGET}
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
   FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders"
+  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
   AUTO
 )
 
 copy_to_runtime_and_install(CurvedStereoGS_Main1
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
   FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders"
+  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
   AUTO
 )
 
 copy_to_runtime_and_install(CurvedStereoGS_KZ
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
   FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders"
+  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
   AUTO
 )
 
 copy_to_runtime_and_install(CurvedStereoGS_NV
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
   FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders"
+  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
   AUTO
 )
 
 copy_to_runtime_and_install(CurvedStereoGS_Test
   DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
   FILES ${Slang_GLSLANG}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/shaders"
+  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
   AUTO
 )

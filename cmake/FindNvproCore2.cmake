@@ -1,5 +1,15 @@
 # FindNvproCore2.cmake
 
+if(NvproCore2_ROOT AND NOT EXISTS "${NvproCore2_ROOT}/nvpro_core2/cmake/Setup.cmake")
+    # A previous build may still cache the old location after a source-tree move.
+    unset(NvproCore2_ROOT CACHE)
+    unset(NvproCore2_ROOT)
+endif()
+if(NVSHADERS_DIR AND NOT EXISTS "${NVSHADERS_DIR}/nvshaders")
+    unset(NVSHADERS_DIR CACHE)
+    unset(NVSHADERS_DIR)
+endif()
+
 if(NOT NvproCore2_FOUND)
     set(_Print_info TRUE)
 endif()
@@ -10,6 +20,7 @@ find_path(NvproCore2_ROOT
     NAMES nvpro_core2/cmake/Setup.cmake
     PATHS
     ${CMAKE_BINARY_DIR}/_deps
+    ${CMAKE_SOURCE_DIR}/third_party
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/..
     ${CMAKE_SOURCE_DIR}/../..
@@ -91,6 +102,7 @@ else()
             NAMES nvpro_core2/cmake/Setup.cmake
             PATHS
             ${CMAKE_BINARY_DIR}/_deps
+            ${CMAKE_SOURCE_DIR}/third_party
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/..
             ${CMAKE_SOURCE_DIR}/../..

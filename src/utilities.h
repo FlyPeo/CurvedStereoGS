@@ -84,7 +84,7 @@ inline static std::vector<std::filesystem::path> getShaderDirs()
   std::filesystem::path exePath = nvutils::getExecutablePath().parent_path();
   std::filesystem::path exeName = nvutils::getExecutablePath().stem();
   return {
-      std::filesystem::absolute(exePath / TARGET_EXE_TO_SOURCE_DIRECTORY / "shaders"),
+      std::filesystem::absolute(exePath / TARGET_EXE_TO_SOURCE_DIRECTORY / "src" / "shaders"),
       std::filesystem::absolute(exePath / TARGET_EXE_TO_NVSHADERS_DIRECTORY),
       std::filesystem::absolute(exePath / TARGET_NAME "_files" / "shaders"),
       std::filesystem::absolute(exePath),

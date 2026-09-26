@@ -6,6 +6,22 @@ CurvedStereoGS 是基于 Vulkan 的 3D Gaussian Splatting 渲染项目，面向�
 
 代码结构与帧流程见 [架构说明](docs/architecture.md)。
 
+## 项目结构
+
+```text
+CurvedStereoGS/
+├─ src/                 渲染器 C++ 源码
+│  ├─ qt/               Qt 控制台源码
+│  └─ shaders/          Slang 着色器与共享头文件
+├─ third_party/         构建所需的第三方源码及各自许可证
+├─ cmake/               CMake 查找模块
+├─ docs/                架构与控制台说明
+├─ models/              本地场景目录（大型模型不上传）
+└─ CMakeLists.txt        项目构建入口
+```
+
+第三方依赖的来源和版本见 [third_party/README.md](third_party/README.md)；Qt 控制台的使用说明见 [docs/qt-control-center.md](docs/qt-control-center.md)。
+
 ## 立体输出
 
 | 模式 | 输出方式 | 要求 |
@@ -32,7 +48,7 @@ cmake --build .codex-build --config Release --target CurvedStereoGS_ControlCente
 .\_bin\Release\CurvedStereoGS.exe --scene C:\path\to\scene.ply --stereoOutputMode 2
 ```
 
-项目、构建目标、主渲染器和 Qt 控制台统一使用 **CurvedStereoGS** 名称。Qt 控制台的详细说明见 [qt/README.md](qt/README.md)。
+项目、构建目标、主渲染器和 Qt 控制台统一使用 **CurvedStereoGS** 名称。
 
 `--stereoOutputMode` 的取值为 `0` 自动、`1` 仅 WGL 四缓冲、`2` 仅 Vulkan Half-SBS。直接构建渲染器时使用 `--target CurvedStereoGS`。仓库默认不上传大型模型、生成文件或本机运行配置；请自行将场景放入本地 `models/`，或使用绝对路径传给 `--scene`。
 
