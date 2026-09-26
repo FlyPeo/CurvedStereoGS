@@ -34,7 +34,7 @@ cmake --build .codex-build --config Release --target CurvedStereoGS_ControlCente
 
 项目、构建目标、主渲染器和 Qt 控制台统一使用 **CurvedStereoGS** 名称。Qt 控制台的详细说明见 [qt/README.md](qt/README.md)。
 
-`--stereoOutputMode` 的取值为 `0` 自动、`1` 仅 WGL 四缓冲、`2` 仅 Vulkan Half-SBS。直接构建渲染器时使用 `--target CurvedStereoGS`。仓库默认不上传大型模型、生成文件或本机运行配置；请自行将场景放入本地 `models/`，或使用绝对路径传给 `--scene`。仓库内的 [三点测试场景](tests/data/stereo_smoke.ply) 只用于检查渲染链路，不代表真实画质。
+`--stereoOutputMode` 的取值为 `0` 自动、`1` 仅 WGL 四缓冲、`2` 仅 Vulkan Half-SBS。直接构建渲染器时使用 `--target CurvedStereoGS`。仓库默认不上传大型模型、生成文件或本机运行配置；请自行将场景放入本地 `models/`，或使用绝对路径传给 `--scene`。
 
 ## 来源与许可
 

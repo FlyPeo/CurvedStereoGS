@@ -4,4 +4,4 @@ CurvedStereoGS extends [NVIDIA's Vulkan Gaussian Splatting sample](https://githu
 
 The repository also includes third-party source code with its own licenses, including `nvpro_core2/`, `3rdparty/spz/`, `3rdparty/vrdx/`, and `3rdparty/miniply/`. Keep their license files and notices when redistributing the project. The root `LICENSE` contains the Apache License 2.0; it does not replace the terms of those third-party components.
 
-Scene assets are not bundled with the public source repository. `tests/data/stereo_smoke.ply` is a synthetic three-point test fixture.
+Scene assets are not bundled with the public source repository.

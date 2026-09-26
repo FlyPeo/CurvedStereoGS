@@ -20,7 +20,6 @@ CMakeFiles/
 /3rdparty/vrdx/src/generated/
 
 # Scenes and user projects may be large or privately licensed.
-# Keep the tiny, synthetic smoke-test scene in the repository.
 /models/*
 !/models/README.md
 *.ply
@@ -28,4 +27,3 @@ CMakeFiles/
 *.splat
 *.csgs
 *.vkgs
-!tests/data/stereo_smoke.ply
