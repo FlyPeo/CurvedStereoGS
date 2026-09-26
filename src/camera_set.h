@@ -1,0 +1,283 @@
+/*
+ * Copyright (c) 2023-2026, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-FileCopyrightText: Copyright (c) 2023-2026, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#ifndef _CAMERA_SET_H_
+#define _CAMERA_SET_H_
+
+#include <string>
+#include <vector>
+
+#include <glm/glm.hpp>
+
+#include <tinygltf/json.hpp>
+
+#include <nvapp/application.hpp>
+#include <nvvk/resource_allocator.hpp>
+#include <nvvk/debug_util.hpp>
+#include <nvvk/staging.hpp>
+#include <nvvk/acceleration_structures.hpp>
+
+#include <nvutils/camera_manipulator.hpp>
+
+#include "shaderio.h"
+
+namespace curved_stereo_gs {
+
+typedef nvutils::CameraManipulator::Camera NvutilCamera;
+
+struct Camera
+{
+  int model = CAMERA_PINHOLE;
+
+  glm::vec3 eye = glm::vec3(1.7F, 1.5F, 1.7F);  // camera position
+  glm::vec3 ctr = glm::vec3(0, 0, 0);           // center of rotation (look at point) for interaction
+  glm::vec3 up  = glm::vec3(0, 1, 0);           // up vector
+
+  float     fov  = 60.0f;            // field of view
+  glm::vec2 clip = {0.1f, 2000.0f};  // znear, zfar
+
+  int   dofMode   = DOF_DISABLED;
+  float focusDist = 1.3f;    // focus distance to compute depth of field (defocus effect)
+  float aperture  = 0.001f;  // aperture distance to compute depth of field, 0 does no DOF effect
+
+  bool operator==(const Camera& cam) const
+  {
+    return model == cam.model && eye == cam.eye && ctr == cam.ctr && up == cam.up && fov == cam.fov && clip == cam.clip;
+  }
+};
+
+class CameraSet
+{
+
+public:
+  void init(nvutils::CameraManipulator* cameraManip) { m_cameraManip = cameraManip; }
+
+  void deinit()
+  {
+    m_camera = Camera();
+    m_presets.clear();
+    m_cameraManip = nullptr;
+  }
+
+  void reset()
+  {
+    m_camera = Camera();
+    m_presets.clear();
+  }
+
+  // any modification of the camera must be followed by a setCamera for the change to take place
+  Camera getCamera() { return applyNvutilCamera(m_cameraManip->getCamera(), m_camera); }
+
+  void setCamera(const Camera& camera, bool instantSet = true)
+  {
+    m_camera = camera;
+    m_cameraManip->setCamera(toNvutilCamera(camera), instantSet);
+  };
+
+  // Set the home camera preset at index 0.
+  // Inserts rather than overwrites so that presets loaded earlier (e.g., INRIA camera
+  // presets loaded via --loadCameraPresets during CLI parse, before the scene triggers
+  // setHomePreset in onAttach) are shifted to index 1..N instead of being lost.
+  void setHomePreset(const Camera& camera)
+  {
+    if(m_presets.empty())
+      m_presets.push_back(camera);
+    else
+      m_presets.insert(m_presets.begin(), camera);
+  }
+
+  // return the number of cameras in the set
+  uint64_t size() const { return m_presets.size(); }
+
+  // remove all presets
+  void clearPresets() { m_presets.clear(); }
+
+  // store the current camera parameter in a new preset entry
+  // if a preset with same attributes already exists, no additional
+  // preset is created and index of existing one is returned
+  uint64_t createPreset(const Camera& camera)
+  {
+    bool     unique = true;
+    uint64_t i      = 0;
+    for(; i < m_presets.size(); ++i)
+    {
+      if(m_presets[i] == camera)
+      {
+        unique = false;
+        break;
+      }
+    }
+    if(unique)
+    {
+      m_presets.emplace_back(camera);
+      return m_presets.size() - 1;
+    }
+    else
+    {
+      return i;
+    }
+  }
+
+  // store the current camera parameter in a new camera entry
+  // is a camera with same attributes already exists, no additional
+  // camera is created and index of existing one is returned
+  uint64_t storeCurrentCamera(void) { return createPreset(getCamera()); }
+
+  // load a camera entry and set
+  bool loadPreset(uint64_t index, bool instantSet = true)
+  {
+    if(index >= m_presets.size())
+      return false;
+    setCamera(m_presets[index], instantSet);
+    return true;
+  }
+
+  // remove a camera from the set (never allows deleting the last remaining preset)
+  bool erasePreset(uint64_t index)
+  {
+    if(m_presets.size() <= 1 || index >= m_presets.size())
+      return false;
+
+    for(uint64_t i = index; i < m_presets.size() - 1; ++i)
+    {
+      m_presets[i] = m_presets[i + 1];
+    }
+    m_presets.resize(m_presets.size() - 1);
+    return true;
+  }
+
+  // access the camera source of given index
+  Camera getPreset(uint64_t index) const
+  {
+    assert(index < m_presets.size());
+    return m_presets[index];
+  }
+
+  // overwrite a camera preset with new values
+  bool setPreset(uint64_t index, const Camera& camera)
+  {
+    if(index >= m_presets.size())
+      return false;
+    m_presets[index] = camera;
+    return true;
+  }
+
+private:
+  Camera                      m_camera;       // active camera
+  std::vector<Camera>         m_presets;      // set of camera presets
+  nvutils::CameraManipulator* m_cameraManip;  // camer manipulatror (navigation/animation)
+
+  // preserves the additional fields of camera
+  // nvutils::CameraManipulator::Camera uses double precision; narrow explicitly to the
+  // single-precision fields used by our Camera struct.
+  Camera& applyNvutilCamera(const NvutilCamera nvuCam, Camera& camera)
+  {
+    camera.eye  = glm::vec3(nvuCam.eye);
+    camera.ctr  = glm::vec3(nvuCam.ctr);
+    camera.up   = glm::vec3(nvuCam.up);
+    camera.fov  = float(nvuCam.fov);
+    camera.clip = glm::vec2(nvuCam.nearFar);
+    return camera;
+  }
+
+  Camera toCamera(const NvutilCamera nvuCam)
+  {
+    // other fields of result are set to default
+    return {
+        .eye  = glm::vec3(nvuCam.eye),
+        .ctr  = glm::vec3(nvuCam.ctr),
+        .up   = glm::vec3(nvuCam.up),
+        .fov  = float(nvuCam.fov),
+        .clip = glm::vec2(nvuCam.nearFar),
+    };
+  }
+
+  NvutilCamera toNvutilCamera(const Camera& camera)
+  {
+    // other fields from camera are "lost"
+    return {
+        .eye     = camera.eye,
+        .ctr     = camera.ctr,
+        .up      = camera.up,
+        .fov     = camera.fov,
+        .nearFar = camera.clip,
+    };
+  }
+};
+
+/////////// Utility function to import cameras from INRIA json files
+
+static bool importCamerasINRIA(std::string filename, CameraSet& cameraSet)
+{
+  using nlohmann::json;
+
+  try
+  {
+    std::ifstream i(filename);
+    if(!i.is_open())
+      return false;
+
+    LOGI("loading camera file %s\n", filename.c_str());
+
+    // Parsing the file
+    json data;
+    i >> data;
+
+    // Access and print the elements
+    for(const auto& item : data)
+    {
+      int                             id       = item.at("id").get<int>();
+      std::string                     img_name = item.at("img_name").get<std::string>();
+      int                             width    = item.at("width").get<int>();
+      int                             height   = item.at("height").get<int>();
+      std::vector<float>              position = item.at("position").get<std::vector<float>>();
+      std::vector<std::vector<float>> rotation = item.at("rotation").get<std::vector<std::vector<float>>>();
+      float                           fy       = item.at("fy").get<float>();
+      float                           fx       = item.at("fx").get<float>();
+
+      // RDF->RUB
+      // we negate rotation and eye
+
+      glm::mat3 rotMat(rotation[0][0], rotation[1][0], rotation[2][0], 
+                       -rotation[0][1], rotation[1][1], rotation[2][1],
+                       rotation[0][2], -rotation[1][2], -rotation[2][2]);
+
+      glm::vec3 up = normalize(rotMat * glm::vec3(0.f, 1.f, 0.f));
+      glm::vec3 at = normalize(rotMat * glm::vec3(0.f, 0.f, 1.f));
+            
+      Camera newCam;
+      newCam.eye = {position[0], -position[1], -position[2]};
+      newCam.ctr = newCam.eye + at;
+      newCam.up  = up;
+
+      // add to CameraSet
+      cameraSet.createPreset(newCam);
+    }
+    i.close();
+    return true;
+  }
+  catch(...)
+  {
+    return false;
+  }
+}
+
+}  // namespace curved_stereo_gs
+
+#endif

@@ -1,0 +1,190 @@
+/*
+ * Copyright (c) 2019-2026, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2026, NVIDIA CORPORATION.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "shaderio.h"
+#include "threedgs_particle_storage.h.slang"
+#include "threedgrt.h.slang"
+#include "threedgrt_custom_attributes.h.slang"
+#include "threedgrt_payload.h.slang"
+
+#include "wireframe_extended.h.slang"
+
+// clang-format off
+[[vk::binding(BINDING_ASSETS, 0)]] ConstantBuffer<SceneAssets> assets;
+[[vk::push_constant]] ConstantBuffer<PushConstantRay> pcRay;
+// clang-format on
+
+SplatSetDesc* getRtxSplatSetDescriptors()
+{
+  // RTX uses a per-TLAS-instance descriptor array when BLAS is split.
+  // Fallback to per-instance descriptors for non-split paths.
+  return (assets.splatSetDescriptorsRtx != nullptr) ? assets.splatSetDescriptorsRtx : assets.splatSetDescriptors;
+}
+
+[shader("intersection")]
+void main()
+{
+#if RTX_USE_INSTANCES
+  // Instanced mode: allways testing the same unit particle, no data fetch inside Hit test function
+  // The TLAS instance transform already accounts for particle position/rotation/scale
+  const float3 canonicalRayOrigin    = ObjectRayOrigin();
+  const float3 canonicalRayDirection = ObjectRayDirection();
+
+#if WIREFRAME || DISABLE_OPACITY_GAUSSIAN
+  // We perform an additional ray/aabb intersection for wireframe or if showing opaque particles
+  // The built in Hardware aabb intersection is an approximation for fast evaluation and may not fit exactly
+  // the AABB, it overestimates. This is not an issue when computing particleDensityHitInstance only, with
+  // proper gaussian gradient (no visual artefacts). However when we need to display accurate sharp boundaries
+  // we need to discard outliers from approximated built-in aabb hardware test.
+
+  const float  aabbSize = 1.0;  // Must match BLAS AABB half-extent [-1,1]^3
+  const float3 aabbMin  = float3(-aabbSize);
+  const float3 aabbMax  = float3(aabbSize);
+
+  float aabbHitT;
+  if(!rayAABBIntersection(canonicalRayOrigin, canonicalRayDirection, aabbMin, aabbMax, RayTMin(), RayTCurrent(), aabbHitT))
+    return;
+#endif
+
+  float ellipsoidHitT = PAYLOAD_INF_DISTANCE;
+  bool  hitEllipsoid =
+      particleDensityHitInstance(canonicalRayOrigin, canonicalRayDirection, RayTMin(), RayTCurrent(), 9.0F, ellipsoidHitT);
+
+#if !WIREFRAME
+  if(hitEllipsoid)
+  {
+    BuiltInTriangleIntersectionAttributes attr;
+    attr.barycentrics = float2(0.0, 0.0);
+    ReportHit(ellipsoidHitT, 0, attr);
+  }
+
+#else
+  CustomIntersectionAttributes attr;
+  attr.aabbHitT     = aabbHitT;
+  attr.barycentrics = float2(0.5, 0.5);
+
+  // We will use hitKind as a bitfield.
+  // Bit 4: particleHit flag (1=ellipsoid hit, 0=only AABB hit)
+  uint hitKind = hitEllipsoid ? (1 << 4) : 0;
+
+  // Compute barycentrics and update hitKind
+  // This will set bits 0-3 (axis index, orientation, triangle)
+  aabbFaceBarycentrics(canonicalRayOrigin, canonicalRayDirection, aabbHitT, aabbSize, hitKind, attr.barycentrics);
+
+  const float reportT = hitEllipsoid ? ellipsoidHitT : aabbHitT;
+
+  // we are sure we at least hit the bbox (otherwise early return)
+  ReportHit(reportT, hitKind, attr);
+
+#endif
+
+#else
+
+  // NO INSTANCES
+  // Attention: this non instanced AABB branch code is forced disabled by UI,
+  // activating can lead to GPU freeze due to massive AABBOX overlaps (see readme).
+
+  const uint   descIndex    = InstanceID();
+  SplatSetDesc splatSetDesc = getRtxSplatSetDescriptors()[descIndex];
+  const int particleId = int(splatSetDesc.splatBase) + PrimitiveIndex();
+
+  // Transform ray to splat model space using splatSetDesc transforms
+  const float3 modelRayOrigin = mul(float4(WorldRayOrigin(), 1.0), splatSetDesc.transformInverse).xyz;
+  // Since the ray direction should not be affected by translation,
+  // uses the inverse of the rotation-scale part of the model matrix.
+  const float3 modelRayDirection = normalize(mul(WorldRayDirection(), splatSetDesc.transformRotScaleInverse));
+
+  float hitT;
+
+  if(particleDensityHitCustom(splatSetDesc, modelRayOrigin, modelRayDirection, particleId, RayTMin(), RayTCurrent(), 9.0F, hitT))
+  {
+    BuiltInTriangleIntersectionAttributes attr;
+    attr.barycentrics = float2(0.0, 0.0);
+    ReportHit(hitT, 0, attr);
+  }
+#endif
+}
+
+// Ray-AABB intersection using slab method
+// Returns true if ray intersects AABB, and outputs the near intersection distance
+// Only reports front-facing intersections; rejects if ray origin is inside the box
+bool rayAABBIntersection(in float3 rayOrigin,
+                         in float3 rayDirection,
+                         in float3 aabbMin,
+                         in float3 aabbMax,
+                         in float  minHitDistance,
+                         in float  maxHitDistance,
+                         out float hitDistance)
+{
+  const double3 invDir         = 1.0 / rayDirection;
+  const double3 t0             = (aabbMin - rayOrigin) * invDir;
+  const double3 t1             = (aabbMax - rayOrigin) * invDir;
+  const double3 tmin           = min(t0, t1);
+  const double3 tmax           = max(t0, t1);
+  const double  tNearUnclamped = max(max(tmin.x, tmin.y), tmin.z);
+  const double  tNear          = max(tNearUnclamped, double(minHitDistance));
+  const double  tFar           = min(min(tmax.x, tmax.y), min(tmax.z, double(maxHitDistance)));
+
+  // Reject if ray origin is inside the box (all entry points are behind us)
+  if(tNearUnclamped < 0.0)
+  {
+    hitDistance = maxHitDistance;
+    return false;
+  }
+
+  hitDistance = float(tNear);
+  return (tNear <= tFar);
+}
+
+bool particleDensityHitInstance(in float3 canonicalRayOrigin,
+                                in float3 canonicalUnormalizedRayDirection,
+                                in float  minHitDistance,
+                                in float  maxHitDistance,
+                                in float  maxParticleSquaredDistance,
+                                out float hitDistance)
+{
+  const float numerator   = -dot(canonicalRayOrigin, canonicalUnormalizedRayDirection);
+  const float denominator = dot(canonicalUnormalizedRayDirection, canonicalUnormalizedRayDirection);
+  hitDistance             = numerator / denominator;
+
+  return (hitDistance > minHitDistance) && (hitDistance < maxHitDistance)
+         && (particleRayMinSquaredDistance(canonicalRayOrigin, normalize(canonicalUnormalizedRayDirection)) < maxParticleSquaredDistance);
+}
+
+bool particleDensityHitCustom(in SplatSetDesc splatSetDesc,
+                              in float3 rayOrigin,
+                              in float3 rayDirection,
+                              in int    particleId,
+                              in float  minHitDistance,
+                              in float  maxHitDistance,
+                              in float  maxParticleSquaredDistance,
+                              out float hitDistance)
+{
+  ThreedgsParticle particle = { splatSetDesc, particleId, true }; // fetch the PSR only 
+
+  float3 canonicalRayOrigin;
+  float3 canonicalRayDirection;
+  particleCannonicalRay(rayOrigin, rayDirection, particle.position, particle.scale, particle.invRotation,
+                        canonicalRayOrigin, canonicalRayDirection);
+
+  hitDistance = particleRayDistance(canonicalRayOrigin, canonicalRayDirection, particle.scale);
+
+  return (hitDistance > minHitDistance) && (hitDistance < maxHitDistance)
+         && (particleRayMinSquaredDistance(canonicalRayOrigin, canonicalRayDirection) < maxParticleSquaredDistance);
+}

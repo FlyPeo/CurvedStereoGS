@@ -1,0 +1,31 @@
+# Local builds and deployed binaries
+/.codex-build/
+/_bin/
+/_install/
+/_downloaded_resources/
+/build/
+/cmake-build-*/
+/.vs/
+CMakeCache.txt
+CMakeFiles/
+*.vcxproj.user
+*.suo
+*.pdb
+*.ilk
+*.obj
+*.log
+*.ini
+
+# Generated shader headers and dependency files
+/3rdparty/vrdx/src/generated/
+
+# Scenes and user projects may be large or privately licensed.
+# Keep the tiny, synthetic smoke-test scene in the repository.
+/models/*
+!/models/README.md
+*.ply
+*.spz
+*.splat
+*.csgs
+*.vkgs
+!tests/data/stereo_smoke.ply
