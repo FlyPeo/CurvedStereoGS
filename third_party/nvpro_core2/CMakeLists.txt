@@ -131,7 +131,13 @@ endif()
 
 # Then set up targets for all nvpro_core libraries.
 # These are in a specific order because of interdependencies.
-foreach(_LIBRARY IN ITEMS nvimageformats nvutils nvapp nvgui nvgpu_monitor nvvk nvgl nvshaders_host nvaftermath nvslang nvvkglsl nvvkgltf nvnsight)
+#
+# CurvedStereoGS only uses nvutils, nvapp, nvgui, nvgpu_monitor, nvvk,
+# nvshaders_host, nvslang and nvvkglsl; the OpenGL (nvgl), glTF (nvvkgltf and its
+# nvimageformats dependency), Aftermath and Nsight modules were removed from this
+# vendored copy to keep the repository small. Restore them from upstream if a
+# future feature needs them.
+foreach(_LIBRARY IN ITEMS nvutils nvapp nvgui nvgpu_monitor nvvk nvshaders_host nvslang nvvkglsl)
   option(NVPRO2_ENABLE_${_LIBRARY} "Enable ${_LIBRARY}" ${NVPRO2_ENABLE_DEFAULT})
   
   if(NVPRO2_ENABLE_${_LIBRARY})

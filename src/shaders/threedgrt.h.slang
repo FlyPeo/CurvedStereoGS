@@ -141,6 +141,9 @@ bool threedgrtProcessHit<let kNormals : bool>(in FrameInfo    frameInfo,
 
   ThreedgsParticle particle = { splatSetDesc, splatId };  // fetch the data, incl. color and opacity in color field
 
+  const SplatRevealState reveal = getSplatRevealState(frameInfo, splatSetDesc, particle.position);
+  particle.scale *= reveal.scale;
+
   // particle density culling
   const float particleDensity = particle.color.w;
   if(particleDensity <= frameInfo.alphaCullThreshold)
@@ -157,7 +160,7 @@ bool threedgrtProcessHit<let kNormals : bool>(in FrameInfo    frameInfo,
   const float rayDist = particleRayMinSquaredDistance(particleRayOrigin, particleRayDirection);
 
   const float maxResponse = particleRayMaxKernelResponse<KERNEL_DEGREE>(rayDist);
-  alpha                   = min(frameInfo.alphaClamp, maxResponse * particleDensity);
+  alpha                   = min(frameInfo.alphaClamp, maxResponse * particleDensity) * reveal.opacity;
 
   const float minParticleAlpha = 1.0f / 255.0f;
   const bool  acceptHit        = (alpha > frameInfo.alphaCullThreshold) && (maxResponse > KERNEL_MIN_RESPONSE);
@@ -165,7 +168,7 @@ bool threedgrtProcessHit<let kNormals : bool>(in FrameInfo    frameInfo,
   if(acceptHit)
   {
 #if DISABLE_OPACITY_GAUSSIAN
-    alpha = 1.0;
+    alpha = reveal.opacity;
 #endif
     // fetch radiance from SH coefs > degree 0
     const float3 vectorToParticleCenter = normalize(particle.position - modelRayOrigin);
@@ -221,6 +224,9 @@ bool threedgsProcessHit<let kNormals : bool>(in FrameInfo    frameInfo,
   normalWorld = float3(0.0);
 
   ThreedgsParticle particle = { splatSetDesc, splatId };
+
+  const SplatRevealState reveal = getSplatRevealState(frameInfo, splatSetDesc, particle.position);
+  particle.scale *= reveal.scale;
 
   float particleDensity = particle.color.w;
   if(particleDensity <= frameInfo.alphaCullThreshold)
@@ -283,14 +289,14 @@ bool threedgsProcessHit<let kNormals : bool>(in FrameInfo    frameInfo,
     return false;
 #pragma warning(default: 41018)
 
-  alpha = min(frameInfo.alphaClamp, exp(-0.5 * mahal) * particleDensity);
+  alpha = min(frameInfo.alphaClamp, exp(-0.5 * mahal) * particleDensity) * reveal.opacity;
 
   const bool acceptHit = (alpha > frameInfo.alphaCullThreshold);
 
   if(acceptHit)
   {
 #if DISABLE_OPACITY_GAUSSIAN
-    alpha = 1.0;
+    alpha = reveal.opacity;
 #endif
     const float3 vectorToParticleCenter = normalize(particle.position - modelRayOrigin);
 #if SHOW_SH_ONLY == 1

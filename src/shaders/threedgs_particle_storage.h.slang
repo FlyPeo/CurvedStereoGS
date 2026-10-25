@@ -41,6 +41,69 @@ void resolveGlobalSplatID(in SceneAssets assets, in uint globalSplatID, out Spla
   localSplatID                = entry.splatIndex;
 }
 
+struct SplatRevealState
+{
+  float opacity;
+  float scale;
+};
+
+SplatRevealState getSplatRevealState(in FrameInfo frameInfo, in SplatSetDesc desc, in float3 splatCenter)
+{
+  SplatRevealState state;
+  state.opacity = 1.0;
+  state.scale   = 1.0;
+
+  if(desc.loadRevealStartTime < 0.0 || desc.loadRevealRadius <= 1.0e-6)
+    return state;
+
+  const float elapsed = frameInfo.loadRevealTime - desc.loadRevealStartTime;
+  if(elapsed >= SPLAT_REVEAL_DURATION_SECONDS)
+    return state;
+
+  // First show every splat as a small point. The radial reveal starts only
+  // after that full point cloud has had time to appear on screen.
+  if(elapsed < SPLAT_REVEAL_POINT_CLOUD_SECONDS)
+  {
+    state.scale = 0.025;
+    return state;
+  }
+
+  const float expansionElapsed = elapsed - SPLAT_REVEAL_POINT_CLOUD_SECONDS;
+  const float progress = saturate(expansionElapsed / SPLAT_REVEAL_EXPANSION_SECONDS);
+  // Measure distance in the asset's 3D coordinate system. This keeps the
+  // expansion rooted in the model even when the camera moves or the model is
+  // shown from a different angle.
+  const float distanceFromCenter = length(splatCenter - desc.loadRevealCenter.xyz) / max(desc.loadRevealRadius, 1.0e-6);
+  const float edgeWidth = 0.025;
+
+  // Keep all points visible while a soft 3D front expands from the model
+  // center. Each point grows into its full Gaussian as the front passes.
+  const float growth = smoothstep(distanceFromCenter - edgeWidth,
+                                  distanceFromCenter - edgeWidth + 0.24,
+                                  progress);
+  state.scale = lerp(0.025, 1.0, growth);
+  return state;
+}
+
+void applySplatRevealScale(inout float2 basisVector1, inout float2 basisVector2, in float scale)
+{
+  basisVector1 *= scale;
+  basisVector2 *= scale;
+
+  // Keep the earliest points visible as small screen-space dots instead of
+  // allowing their quads to collapse below raster precision.
+  if(scale < 0.999)
+  {
+    const float minPointExtent = 0.55;
+    float       extent1        = length(basisVector1);
+    float       extent2        = length(basisVector2);
+    if(extent1 < minPointExtent)
+      basisVector1 = extent1 > 1.0e-5 ? basisVector1 * (minPointExtent / extent1) : float2(minPointExtent, 0.0);
+    if(extent2 < minPointExtent)
+      basisVector2 = extent2 > 1.0e-5 ? basisVector2 * (minPointExtent / extent2) : float2(0.0, minPointExtent);
+  }
+}
+
 //==============================================================================
 // Constants
 //==============================================================================

@@ -1,0 +1,37 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-release",
+      "displayName": "Windows Release",
+      "description": "Configure the renderer without downloading the default scene or requiring Qt.",
+      "generator": "Visual Studio 17 2022",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "architecture": {
+        "value": "x64",
+        "strategy": "external"
+      },
+      "cacheVariables": {
+        "CMAKE_CONFIGURATION_TYPES": "Release",
+        "DISABLE_DEFAULT_SCENE": "ON",
+        "CURVED_STEREO_GS_BUILD_QT_CONTROL_CENTER": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-release",
+      "configurePreset": "windows-release",
+      "configuration": "Release",
+      "targets": [
+        "CurvedStereoGS"
+      ],
+      "jobs": 8
+    }
+  ]
+}

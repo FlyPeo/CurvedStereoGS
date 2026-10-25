@@ -86,7 +86,10 @@ inline static std::vector<std::filesystem::path> getShaderDirs()
   return {
       std::filesystem::absolute(exePath / TARGET_EXE_TO_SOURCE_DIRECTORY / "src" / "shaders"),
       std::filesystem::absolute(exePath / TARGET_EXE_TO_NVSHADERS_DIRECTORY),
+      // Portable layout: shaders shipped next to the executable in
+      // <exeDir>/CurvedStereoGS_files/, independent of the dev source tree.
       std::filesystem::absolute(exePath / TARGET_NAME "_files" / "shaders"),
+      std::filesystem::absolute(exePath / TARGET_NAME "_files" / "nvshaders"),
       std::filesystem::absolute(exePath),
   };
 }

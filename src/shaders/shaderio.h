@@ -264,6 +264,11 @@ enum class SplatTexIndex : uint32_t
 #define TEMPORAL_SAMPLING_ENABLED 1   // Force enabled
 #define TEMPORAL_SAMPLING_DISABLED 2  // Force disabled
 
+// Keep the complete model visible as a point cloud before its Gaussians expand.
+#define SPLAT_REVEAL_POINT_CLOUD_SECONDS 0.45f
+#define SPLAT_REVEAL_EXPANSION_SECONDS 2.35f
+#define SPLAT_REVEAL_DURATION_SECONDS (SPLAT_REVEAL_POINT_CLOUD_SECONDS + SPLAT_REVEAL_EXPANSION_SECONDS)
+
 // bindings for set 0 of Post Process (0 is reserved for BINDING_FRAME_INFO_UBO)
 #define POST_BINDING_MAIN_IMAGE 1  // the image that is presented
 #define POST_BINDING_AUX1_IMAGE 2  // optional aux image to be accumulated (for example)
@@ -448,6 +453,12 @@ struct FrameInfo
   float4x4 stereoProjInverse[2];
   float3   stereoCameraPosition[2];
   float    stereoCameraPadding[2];
+
+  // Elapsed seconds since the renderer started; used by per-asset load reveals.
+  float loadRevealTime;
+  float loadRevealPadding0;
+  float loadRevealPadding1;
+  float loadRevealPadding2;
 };
 
 #ifndef __cplusplus
@@ -664,6 +675,13 @@ struct SplatSetDesc
 
   // Per-instance material (each splat instance has its own material)
   Material material;
+
+  // Per-asset reveal state, anchored to the 3D center of the model bounds.
+  float loadRevealRadius;
+  float loadRevealStartTime;
+  float loadRevealPadding0;
+  float loadRevealPadding1;
+  float4 loadRevealCenter;
 };
 
 // SceneAssets: Unified bindless asset structure (single binding point)

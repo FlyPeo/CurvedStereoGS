@@ -91,6 +91,12 @@ void SplatSetInstanceVk::rebuildDescriptor(const SplatSetVk* splatSet, shaderio:
   descriptor.transformRotScaleInverse = transformRotScaleInverse;
   descriptor.prevTransform            = prevTransform;
 
+  descriptor.loadRevealRadius = splatSet->loadRevealRadius;
+  descriptor.loadRevealStartTime = splatSet->loadRevealStartTime;
+  descriptor.loadRevealPadding0 = 0.0f;
+  descriptor.loadRevealPadding1 = 0.0f;
+  descriptor.loadRevealCenter = glm::vec4(splatSet->loadRevealCenter, 0.0f);
+
   // Update needShading flag before copying to GPU descriptor
   shaderio::updateMaterialNeedsShading(splatMaterial);
   descriptor.material = splatMaterial;

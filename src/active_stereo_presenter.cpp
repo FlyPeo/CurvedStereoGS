@@ -18,6 +18,7 @@
  */
 
 #include "active_stereo_presenter.h"
+#include "stereo_frame_stats.h"
 #include "stereo_interop_vk.h"
 
 #if defined(_WIN32)
@@ -35,6 +36,8 @@
 
 #include <GL/glcustom.h>
 #include <nvutils/camera_manipulator.hpp>
+
+#include <chrono>
 
 #ifndef GL_FRAMEBUFFER_SRGB
 #define GL_FRAMEBUFFER_SRGB 0x8DB9
@@ -1101,7 +1104,10 @@ bool ActiveStereoQuadBufferPresenter::presentInterop(StereoInteropVk& interop, u
 
   m_interopGl->signalSemaphore(slot.openglDone, 0, nullptr, StereoInteropVk::kEyeCount, slot.textures.data(), layouts.data());
   glFlush();
+  const auto swapBuffersStart = std::chrono::steady_clock::now();
   SwapBuffers(deviceContext);
+  StereoFrameStats::setSwapBuffersMs(
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - swapBuffersStart).count());
   interop.notifyOpenGlPresented(frameNumber);
 
   m_interopGl->bindFramebuffer(GL_READ_FRAMEBUFFER, 0);

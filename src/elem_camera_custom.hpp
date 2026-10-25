@@ -28,39 +28,12 @@ public:
     }
 
     auto manip = getCameraManipulator();
-    if(!manip) return;
-
-    manip->updateAnim();
-
-    // If ImGui is capturing mouse for another window/widget, ignore.
-    if(ImGui::GetIO().WantCaptureMouse)
-    {
+    if(!manip)
       return;
-    }
 
-    nvutils::CameraManipulator::Inputs inputs;
-    inputs.lmb   = ImGui::IsMouseDown(ImGuiMouseButton_Left);
-    inputs.rmb   = ImGui::IsMouseDown(ImGuiMouseButton_Right);
-    inputs.mmb   = ImGui::IsMouseDown(ImGuiMouseButton_Middle);
-    inputs.ctrl  = ImGui::IsKeyDown(ImGuiKey_LeftCtrl) || ImGui::IsKeyDown(ImGuiKey_RightCtrl);
-    inputs.shift = ImGui::IsKeyDown(ImGuiKey_LeftShift) || ImGui::IsKeyDown(ImGuiKey_RightShift);
-    inputs.alt   = ImGui::IsKeyDown(ImGuiKey_LeftAlt) || ImGui::IsKeyDown(ImGuiKey_RightAlt);
-    ImVec2 mousePos = ImGui::GetMousePos();
-
-    if(ImGui::IsMouseClicked(ImGuiMouseButton_Left) || ImGui::IsMouseClicked(ImGuiMouseButton_Middle) || ImGui::IsMouseClicked(ImGuiMouseButton_Right))
-    {
-      manip->setMousePosition({mousePos.x, mousePos.y});
-    }
-
-    if(ImGui::IsMouseDragging(ImGuiMouseButton_Left, 1.0F) || ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 1.0F) || ImGui::IsMouseDragging(ImGuiMouseButton_Right, 1.0F))
-    {
-      manip->mouseMove({mousePos.x, mousePos.y}, inputs);
-    }
-
-    if(ImGui::GetIO().MouseWheel != 0.0F)
-    {
-      manip->wheel(ImGui::GetIO().MouseWheel * -10.0f, inputs);
-    }
+    // Reuse nvapp's viewport-aware camera controls: left-drag trackball orbit,
+    // mouse pan/dolly, wheel zoom, and WASD translation (Shift/Ctrl adjust speed).
+    nvapp::ElementCamera::updateCamera(manip, ImGui::FindWindowByName("Viewport"));
   }
 
 private:

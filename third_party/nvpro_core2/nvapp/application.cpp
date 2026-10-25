@@ -519,6 +519,21 @@ void nvapp::Application::setupImguiDock()
 {
   const ImGuiDockNodeFlags dockFlags = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_NoDockingInCentralNode;
   ImGuiID dockID = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport(), dockFlags);
+
+  // Older layouts could save the Viewport as a floating window while leaving
+  // the dockspace split (for example, when the window was created with
+  // ImGuiWindowFlags_NoDocking). Restore the renderer's fixed central viewport
+  // instead of keeping that stale floating layout across launches.
+  ImGuiWindow* viewportWindow = ImGui::FindWindowByName("Viewport");
+  if(viewportWindow != nullptr && viewportWindow->DockId == 0)
+  {
+    if(ImGuiDockNode* centralNode = ImGui::DockBuilderGetCentralNode(dockID))
+    {
+      ImGui::DockBuilderDockWindow("Viewport", centralNode->ID);
+      ImGui::DockBuilderFinish(dockID);
+    }
+  }
+
   // Docking layout, must be done only if it doesn't exist
   if(!ImGui::DockBuilderGetNode(dockID)->IsSplitNode() && !ImGui::FindWindowByName("Viewport"))
   {

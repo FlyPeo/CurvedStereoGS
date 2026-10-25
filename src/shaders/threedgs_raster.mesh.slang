@@ -224,6 +224,13 @@ void main(uint3                                             groupThreadID: SV_Gr
     }
 
     const float3 splatCenter = fetchCenter(splatSetDesc, splatIndex);
+    const SplatRevealState reveal = getSplatRevealState(frameInfo, splatSetDesc, splatCenter);
+    splatColor.a *= reveal.opacity;
+    if(splatColor.a < frameInfo.alphaCullThreshold)
+    {
+      emitDegeneratedQuad(localIndex, verts);
+      return;
+    }
     
     // Use transform from descriptor, not push constants
     const float4x4 modelViewMatrix = mul(splatSetDesc.transform, viewMatrix);
@@ -319,6 +326,7 @@ void main(uint3                                             groupThreadID: SV_Gr
       emitDegeneratedQuad(localIndex, verts);
       return;
     }
+    applySplatRevealScale(basisVector1, basisVector2, reveal.scale);
 
 #if MESH_SHADER_PER_PRIMITIVE_ATTRIBS && MS_ANTIALIASING == 1
     // emit the color with alpha compensation after threedgsProjectedExtentBasis modified splatColor.a

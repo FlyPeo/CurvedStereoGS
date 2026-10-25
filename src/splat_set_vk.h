@@ -73,6 +73,12 @@ public:
   Flags  flags            = Flags::eNone;  // Set by manager methods only
   size_t instanceRefCount = 0;             // Number of instances referencing this splat set
 
+  // Startup reveal metadata shared by all instances of this asset. The reveal
+  // expands from the center of the model-space point-cloud bounds.
+  glm::vec3 loadRevealCenter{0.0f};
+  float     loadRevealRadius{1.0f};
+  float     loadRevealStartTime{-1.0f};
+
   SplatSetVk() = default;
 
   ~SplatSetVk(void) {}

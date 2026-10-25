@@ -131,6 +131,14 @@ VertexOutput main(VertexInput input, uint viewID : SV_ViewID)
     return output;
   }
 
+  const SplatRevealState reveal = getSplatRevealState(frameInfo, splatSetDesc, splatCenter);
+  splatColor.a *= reveal.opacity;
+  if(splatColor.a < frameInfo.alphaCullThreshold)
+  {
+    output.position = float4(0.0, 0.0, 2.0, 1.0);
+    return output;
+  }
+
 #if SHOW_SH_ONLY == 1
   splatColor.rgb = float3(0.5, 0.5, 0.5);
 #endif
@@ -161,6 +169,7 @@ VertexOutput main(VertexInput input, uint viewID : SV_ViewID)
     output.position = float4(0.0, 0.0, 2.0, 1.0);
     return output;
   }
+  applySplatRevealScale(basisVector1, basisVector2, reveal.scale);
 
 #if MS_ANTIALIASING == 1
   // emit the color with alpha compensation (after threedgsProjectedExtentBasis modified splatColor.a)

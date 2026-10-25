@@ -34,6 +34,7 @@
 #include <glm/gtc/packing.hpp>  // Required for half-float operations
 
 #include <algorithm>
+#include <numeric>
 #include <cmath>
 
 #include <nvvk/check_error.hpp>
@@ -179,6 +180,7 @@ GaussianSplatting::GaussianSplatting(nvutils::ProfilerManager* profilerManager, 
 };
 
 GaussianSplatting::~GaussianSplatting() {
+  destroyDynamicAnimate();
   // all threads must be stopped,
   // work done in onDetach(),
   // could be done here, same result
@@ -286,6 +288,13 @@ void GaussianSplatting::onAttach(nvapp::Application* app)
   m_assets.cameras.setCamera(Camera());
   m_assets.cameras.setHomePreset(m_assets.cameras.getCamera());
 
+  // Apply the selected training view during attachment, before the first
+  // rendered frame. The scene and its .dgs stream load asynchronously later;
+  // waiting for onRender would briefly initialize the viewport at the generic
+  // orbit camera and can make the first visible frame point away from the data.
+  if(m_trainingCameraRequested)
+    initializeTrainingCamera();
+
 #if defined(USE_DLSS)
   // Initialize DLSS
   DlssDenoiser::InitResources dlssRes{
@@ -354,13 +363,45 @@ void GaussianSplatting::onAttach(nvapp::Application* app)
   // Initialize Tonemapper
   initTonemapper();
 
-  // Request initial shader compilation
-  m_requestUpdateShaders = true;
+  // A startup scene/project is already queued by command-line parsing before
+  // elements attach. Compiling the empty-scene variant here is wasted work:
+  // processUpdateRequests detects the loaded scene composition and compiles
+  // the matching shaders after its assets are ready.
+  const bool startupScenePending = !prmScene.projectToLoadFilename.empty() || !prmScene.sceneLoadQueue.empty();
+  if(startupScenePending)
+  {
+    LOGI("Deferring initial shader compilation until the startup scene is loaded.\n");
+  }
+  else
+  {
+    m_requestUpdateShaders = true;
+  }
 };
 
 void GaussianSplatting::onDetach()
 {
   vkDeviceWaitIdle(m_device);
+  m_shuttingDown = true;  // processUpdateRequests() must not rebuild shaders past this point
+
+  // Log the steady-state frame timing collected in onRender (skips the first
+  // 30 samples so scene load / first-frame spikes do not skew percentiles).
+  if(m_frameStatMs.size() > 30)
+  {
+    std::vector<float> samples(m_frameStatMs.begin() + 30, m_frameStatMs.end());
+    std::sort(samples.begin(), samples.end());
+    const double sum = std::accumulate(samples.begin(), samples.end(), 0.0);
+    const double mean = sum / double(samples.size());
+    const auto   pct  = [&](double p) { return samples[size_t(p * double(samples.size() - 1))]; };
+    LOGI("Frame timing (steady state, %zu frames): mean %.3f ms (%.1f fps), p50 %.3f ms, p95 %.3f ms, p99 %.3f ms, max %.3f ms\n",
+         samples.size(), mean, 1000.0 / mean, pct(0.50), pct(0.95), pct(0.99), samples.back());
+  }
+  m_frameStatMs.clear();
+
+  // Close the dynamic sequence before the scene teardown destroys the buffers
+  // it references (docs/dynamic-4dgs.md).
+  m_dynamicSequenceOpen = false;
+  m_dynamicSequence.close();
+  destroyDynamicAnimate();
 
   // stops the threads
   m_plyLoader.shutdown();
@@ -462,6 +503,17 @@ void GaussianSplatting::onResize(VkCommandBuffer cmd, const VkExtent2D& viewport
 
 void GaussianSplatting::onPreRender()
 {
+  // Advance the reveal clock only while asset uploads and shader rebuilds are
+  // idle, and cap frame gaps so stalls cannot skip the animation before the
+  // model gets its first visible frame.
+  const auto revealNow = std::chrono::steady_clock::now();
+  const float frameDelta = std::chrono::duration<float>(revealNow - m_splatRevealLastClockUpdate).count();
+  m_splatRevealLastClockUpdate = revealNow;
+  const bool assetUpdatesPending = m_assets.hasPendingRequests(!isRtxPipelineActive());
+  if(!assetUpdatesPending && !m_requestUpdateShaders)
+    m_splatRevealClock += std::clamp(frameDelta, 0.0F, 0.05F);
+  prmFrame.loadRevealTime = m_splatRevealClock;
+
   m_profilerTimeline->frameAdvance();
 
   // Reset helper rendering flag at start of frame
@@ -627,9 +679,62 @@ void GaussianSplatting::onPreRender()
   }
 }
 
+void GaussianSplatting::startSplatReveal(const std::shared_ptr<SplatSetVk>& splatSet)
+{
+  if(!splatSet || splatSet->positions.size() < 3)
+    return;
+
+  const size_t pointCount = splatSet->positions.size() / 3;
+
+  // Anchor the reveal at the model-space center of the point-cloud bounds. A
+  // bounding sphere radius makes the front reach the outermost splats at the
+  // end of the expansion, independent of the viewport or current camera.
+  glm::vec3 boundsMin(0.0f);
+  glm::vec3 boundsMax(0.0f);
+  bool      hasFinitePosition = false;
+  for(size_t i = 0; i + 2 < splatSet->positions.size(); i += 3)
+  {
+    const glm::vec3 position(splatSet->positions[i], splatSet->positions[i + 1], splatSet->positions[i + 2]);
+    if(!std::isfinite(position.x) || !std::isfinite(position.y) || !std::isfinite(position.z))
+      continue;
+
+    if(!hasFinitePosition)
+    {
+      boundsMin = position;
+      boundsMax = position;
+      hasFinitePosition = true;
+    }
+    else
+    {
+      boundsMin = glm::min(boundsMin, position);
+      boundsMax = glm::max(boundsMax, position);
+    }
+  }
+  if(!hasFinitePosition)
+    return;
+
+  splatSet->loadRevealCenter = (boundsMin + boundsMax) * 0.5F;
+  splatSet->loadRevealRadius = std::max(glm::length(boundsMax - splatSet->loadRevealCenter), 1.0e-6F);
+  splatSet->loadRevealStartTime = prmFrame.loadRevealTime;
+  m_splatRevealEndTime = std::max(m_splatRevealEndTime, splatSet->loadRevealStartTime + SPLAT_REVEAL_DURATION_SECONDS);
+  LOGI("Starting model-center-outward splat reveal (%zu splats; center %.3f, %.3f, %.3f; radius %.3f; point cloud %.2fs, Gaussian expansion %.2fs).\n",
+       pointCount, splatSet->loadRevealCenter.x, splatSet->loadRevealCenter.y, splatSet->loadRevealCenter.z,
+       splatSet->loadRevealRadius, SPLAT_REVEAL_POINT_CLOUD_SECONDS, SPLAT_REVEAL_EXPANSION_SECONDS);
+  resetFrameCounter();
+}
+
 void GaussianSplatting::onRender(VkCommandBuffer cmd)
 {
   NVVK_DBG_SCOPE(cmd);
+  m_dynamicFrameId++;
+
+  // Steady-state frame timing for benchmark comparisons (logged in onDetach).
+  {
+    const auto now = std::chrono::steady_clock::now();
+    if(m_frameStatLast.time_since_epoch().count() != 0)
+      m_frameStatMs.push_back(std::chrono::duration<float, std::milli>(now - m_frameStatLast).count());
+    m_frameStatLast = now;
+  }
 
   // Collect metrics result from previous frame if available
   m_imageCompare.collectMetricsResult();
@@ -662,6 +767,11 @@ void GaussianSplatting::onRender(VkCommandBuffer cmd)
   // 0 if not at least one valide splat set
   const uint32_t splatCount = m_assets.splatSets.getTotalGlobalSplatCount();
 
+  // Keep loading animation frames fresh and prevent temporal accumulation from
+  // blending earlier point-cloud stages into the expanded Gaussian model.
+  if(prmFrame.loadRevealTime < m_splatRevealEndTime)
+    resetFrameCounter();
+
   // Update frame counter once per frame and check if temporal sampling has
   // converged IMPORTANT: Call updateFrameCounter() only once to avoid
   // incrementing frameSampleId multiple times
@@ -681,6 +791,28 @@ void GaussianSplatting::onRender(VkCommandBuffer cmd)
   {
     updateRtDescriptorSet();
     m_sky.clearImageViewChanged();
+  }
+
+  // Open the dynamic sequence in the common path before either raster or
+  // ray-tracing rendering. Training-camera metadata is used once during attach
+  // to establish the initial viewpoint; per-frame resets would block input.
+  if(m_shaders.valid)
+  {
+    if(splatCount && m_dynamicSequenceRequested && !m_dynamicSequenceOpen)
+      openDynamicSequence();
+
+    if(m_dynamicSequenceOpen)
+    {
+      const bool         headless       = (m_app->getWindowHandle() == nullptr);
+      const uint32_t     frameLimit     = m_app->getHeadlessFrameCount();
+      const bool         stopAnimating = headless && frameLimit != 0 && frameLimit != UINT32_MAX
+                                        && m_dynamicFrameId + 1 >= frameLimit;
+      if(!stopAnimating)
+      {
+        animateDynamicSplats(cmd, splatCount);
+        resetFrameCounter();
+      }
+    }
   }
 
   // Do the actual rendering
@@ -838,7 +970,45 @@ void GaussianSplatting::renderHybridPipeline(VkCommandBuffer cmd, uint32_t splat
       {
         m_profilerTimeline->asyncRemoveTimer("CPU Dist");
         m_profilerTimeline->asyncRemoveTimer("CPU Sort");
-        processSortingOnGPU(cmd, splatCount);
+        // The GPU sort key derives from the center-eye view/projection only
+        // (dist.comp.slang), so the sorted order stays valid while the camera
+        // is static, splat positions did not change (dynamic sequences, loads
+        // and gizmo drags mark the order dirty), and opacity culling did not
+        // toggle. Skipping the re-sort keeps the previous sorted indices and
+        // indirect draw count, which are still resident on the GPU.
+        const glm::dmat4& sortView = cameraManip->getViewMatrix();
+        // The GPU sort shader consumes single-precision frame matrices. Compare
+        // the same representation we cache below; comparing a dmat4's bytes to
+        // a mat4 never matches and sorts the full scene on every frame.
+        const glm::mat4 currentSortView(sortView);
+        const double      sortFov  = cameraManip->getFov();
+        const bool        orderStale = m_sortDirty
+                                       || std::memcmp(&currentSortView, &m_lastSortViewMatrix, sizeof(glm::mat4)) != 0
+                                       || sortFov != m_lastSortFov
+                                       || prmRender.opacityGaussianDisabled != m_lastSortOpacityDisabled
+                                       || m_helpers.transform.isDragging();
+        if(orderStale)
+        {
+          processSortingOnGPU(cmd, splatCount);
+          m_lastSortViewMatrix      = currentSortView;
+          m_lastSortFov             = sortFov;
+          m_lastSortOpacityDisabled = prmRender.opacityGaussianDisabled;
+          m_sortDirty               = false;
+        }
+        else
+        {
+          // The sorted indices and indirect draw count were written by an
+          // earlier submission (they are unchanged); make them visible to this
+          // frame's draw reads without re-running the sort.
+          VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+          barrier.srcAccessMask   = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+          barrier.dstAccessMask   = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+          vkCmdPipelineBarrier(cmd,
+                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT
+                                   | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                               0, 1, &barrier, 0, NULL, 0, NULL);
+        }
       }
       else
       {
@@ -1578,6 +1748,11 @@ void GaussianSplatting::processUpdateRequests(bool forceAll)
   resetFrameCounter();
   vkDeviceWaitIdle(m_device);
 
+  if(m_requestUpdateShaders && m_shuttingDown)
+  {
+    // Exiting: a pending recompile would rebuild every pipeline for nothing.
+    m_requestUpdateShaders = false;
+  }
   if(m_requestUpdateShaders)
   {
     deinitPipelines();
@@ -1599,6 +1774,7 @@ void GaussianSplatting::processUpdateRequests(bool forceAll)
       initRtPipeline();
       initDescriptorSetPostProcessing();
       initPipelinePostProcessing();
+      initDynamicAnimate();
       m_imageCompare.rebuildPipelines();
 
       if(isRtxPipeline)
@@ -2449,10 +2625,14 @@ void GaussianSplatting::readBackIndirectParametersIfNeeded(VkCommandBuffer cmd)
     // ensures m_indirect buffer modified by any shader stage is available for
     // transfer
     VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    barrier.srcAccessMask   = VK_ACCESS_MEMORY_WRITE_BIT;
-    barrier.dstAccessMask   = VK_ACCESS_TRANSFER_READ_BIT;
+    // Only the distance/cull compute and the indirect-parameter reset write
+    // this buffer; constraining the barrier to those stages keeps the copy
+    // from serializing against unrelated in-flight work.
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_2_TRANSFER_BIT, 0, 1, &barrier, 0, NULL, 0, NULL);
 
     // copy from device to host buffer
     VkBufferCopy bc{.srcOffset = 0, .dstOffset = 0, .size = sizeof(shaderio::IndirectParams)};
@@ -2531,6 +2711,8 @@ void GaussianSplatting::updateRasterizationMemoryStatistics(const uint32_t splat
 void GaussianSplatting::reset()
 {
   vkDeviceWaitIdle(m_device);
+
+  m_splatRevealEndTime = 0.0F;
 
   m_canCollectReadback = false;
   m_projectPath.clear();
@@ -2721,12 +2903,140 @@ void GaussianSplatting::updateSlangMacros()
   }
 }
 
+namespace
+{
+// FNV-1a 64-bit over raw bytes; enough for cache keys (collisions are not a
+// correctness risk class here: any hit replays SPIR-V that the same sources
+// + macros produced).
+uint64_t fnv1a64(uint64_t hash, const void* data, size_t size)
+{
+  const uint8_t* bytes = static_cast<const uint8_t*>(data);
+  for(size_t i = 0; i < size; ++i)
+  {
+    hash ^= bytes[i];
+    hash *= 0x100000001B3ULL;
+  }
+  return hash;
+}
+
+std::filesystem::path shaderCacheDirectory()
+{
+  return nvutils::getExecutablePath().parent_path() / "shader_cache";
+}
+
+std::string hex64(uint64_t value)
+{
+  static const char* hex = "0123456789ABCDEF";
+  std::string        s(16, '0');
+  for(int i = 15; i >= 0; --i)
+  {
+    s[size_t(i)] = hex[value & 0xF];
+    value >>= 4;
+  }
+  return s;
+}
+}  // namespace
+
+void GaussianSplatting::ensureShaderSourceDigest()
+{
+  if(m_shaderCacheDigestReady)
+    return;
+  m_shaderCacheDigestReady = true;
+
+  uint64_t hash = fnv1a64(0xCBF29CE484222325ULL, "GS_SHADER_CACHE_V1", strlen("GS_SHADER_CACHE_V1"));
+  // Hash every .slang/.h under all shader search dirs, in stable name order:
+  // editing ANY shader or shared header invalidates every cached entry, which
+  // simply costs one cold (uncached) startup.
+  std::vector<std::filesystem::path> sources;
+  for(const auto& dir : getShaderDirs())
+  {
+    std::error_code ec;
+    for(std::filesystem::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec))
+    {
+      const std::string ext = it->path().extension().string();
+      if(ext == ".slang" || ext == ".h")
+        sources.push_back(it->path());
+    }
+  }
+  std::sort(sources.begin(), sources.end());
+  for(const auto& file : sources)
+  {
+    std::ifstream in(file, std::ios::binary);
+    if(!in)
+      continue;
+    hash = fnv1a64(hash, file.filename().string().data(), file.filename().string().size());
+    char   buf[65536];
+    while(in.read(buf, sizeof(buf)) || in.gcount() > 0)
+    {
+      hash = fnv1a64(hash, buf, static_cast<size_t>(in.gcount()));
+      if(!in)
+        break;
+    }
+  }
+  m_shaderCacheDigest = hex64(hash);
+}
+
+std::string shaderCacheKey(const std::string& filename, const std::string& digest,
+                           const std::vector<std::pair<std::string, std::string>>& macros)
+{
+  std::string macroList;
+  for(const auto& macro : macros)
+  {
+    macroList += macro.first;
+    macroList += '=';
+    macroList += macro.second;
+    macroList += ';';
+  }
+  uint64_t hash = fnv1a64(0xCBF29CE484222325ULL, digest.data(), digest.size());
+  hash         = fnv1a64(hash, filename.data(), filename.size());
+  hash = fnv1a64(hash, macros.data(), macros.size());
+  return hex64(hash);
+}
+
+bool GaussianSplatting::tryLoadCachedSpirv(const std::string& filename, std::vector<uint32_t>& spirv)
+{
+  ensureShaderSourceDigest();
+  std::ifstream in(shaderCacheDirectory() / (shaderCacheKey(filename, m_shaderCacheDigest, m_shaderMacros) + ".spv"),
+                   std::ios::binary);
+  if(!in)
+    return false;
+  in.seekg(0, std::ios::end);
+  const std::streamoff size = in.tellg();
+  if(size <= 0 || size % 4 != 0)
+    return false;
+  spirv.resize(size_t(size) / 4);
+  in.seekg(0, std::ios::beg);
+  in.read(reinterpret_cast<char*>(spirv.data()), size);
+  return in.good();
+}
+
+void GaussianSplatting::storeCachedSpirv(const std::string& filename, const uint32_t* code, size_t byteSize)
+{
+  std::error_code ec;
+  const std::filesystem::path dir = shaderCacheDirectory();
+  std::filesystem::create_directories(dir, ec);
+  std::ofstream out(dir / (shaderCacheKey(filename, m_shaderCacheDigest, m_shaderMacros) + ".spv"), std::ios::binary);
+  if(out)
+    out.write(reinterpret_cast<const char*>(code), std::streamsize(byteSize));
+}
+
 bool GaussianSplatting::compileSlangShader(const std::string& filename, VkShaderModule& module)
 {
-
-  if(!m_slangCompiler.compileFile(filename))
+  std::vector<uint32_t> spirv;
+  if(tryLoadCachedSpirv(filename, spirv))
   {
-    return false;
+    m_shaderCacheHits++;
+  }
+  else
+  {
+    m_shaderCacheMisses++;
+    if(!m_slangCompiler.compileFile(filename))
+    {
+      return false;
+    }
+    const size_t byteSize = m_slangCompiler.getSpirvSize();
+    storeCachedSpirv(filename, m_slangCompiler.getSpirv(), byteSize);
+    spirv.assign(m_slangCompiler.getSpirv(), m_slangCompiler.getSpirv() + byteSize / sizeof(uint32_t));
   }
 
   if(module != VK_NULL_HANDLE)
@@ -2734,10 +3044,10 @@ bool GaussianSplatting::compileSlangShader(const std::string& filename, VkShader
 
   // Create the VK module
   VkShaderModuleCreateInfo createInfo{.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                                      .codeSize = m_slangCompiler.getSpirvSize(),
-                                      .pCode    = m_slangCompiler.getSpirv()};
+                                      .codeSize = spirv.size() * sizeof(uint32_t),
+                                      .pCode    = spirv.data()};
 
-  if(m_slangCompiler.getSpirvSize() == 0)
+  if(spirv.empty())
   {
     LOGE("Missing entry point in shader %s\n", filename.c_str());
     return false;
@@ -2797,6 +3107,10 @@ bool GaussianSplatting::initShaders(void)
   }
   // Post processings
   success &= compileSlangShader("post.comp.slang", m_shaders.postComputeShader);
+  // Dynamic 4DGS animate pass (docs/dynamic-4dgs.md). Soft failure: dynamic
+  // playback is disabled but the rest of the renderer is unaffected.
+  if(!compileSlangShader("dynamic_animate.comp.slang", m_shaders.animateShader))
+    LOGW("Dynamic animate shader unavailable; 4DGS playback disabled.\n");
   // Deferred shading (for raster-only pipelines with surface reconstruction)
   if(prmRender.lightingEnabled)
   {
@@ -2817,7 +3131,10 @@ bool GaussianSplatting::initShaders(void)
 
   auto      endTime   = std::chrono::high_resolution_clock::now();
   long long buildTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
-  LOGI("Shaders updated in %lldms\n", buildTime);
+  LOGI("Shaders updated in %lldms (disk cache: %u loaded, %u compiled)\n", buildTime, m_shaderCacheHits,
+       m_shaderCacheMisses);
+  m_shaderCacheHits   = 0;
+  m_shaderCacheMisses = 0;
 
   return (m_shaders.valid = true);
 }
@@ -4673,6 +4990,311 @@ void GaussianSplatting::initPipelinePostProcessing()
   };
   vkCreateComputePipelines(m_device, m_pipelineCache, 1, &pipelineInfo, nullptr, &m_computePipelinePostProcess);
   NVVK_DBG_NAME(m_computePipelinePostProcess);
+}
+
+///////////////////////////////
+// Dynamic 4DGS sequence (docs/dynamic-4dgs.md)
+
+namespace {
+constexpr uint32_t DYN_BINDING_KEYFRAME_POOL = 0;
+constexpr uint32_t DYN_BINDING_OUT_CENTERS   = 1;
+
+struct DynamicAnimatePush
+{
+  uint32_t prevFloatOffset;  // in scalar floats into the tightly packed keyframe pool
+  uint32_t nextFloatOffset;
+  float    alpha;
+  uint32_t splatCount;
+};
+static_assert(sizeof(DynamicAnimatePush) == 16, "push constant layout must match dynamic_animate.comp.slang");
+}  // namespace
+
+bool GaussianSplatting::openDynamicSequence()
+{
+  if(m_dynamicSequenceOpen || m_dynamicSequencePath.empty())
+    return m_dynamicSequenceOpen;
+  if(m_assets.splatSets.getSplatSetCount() == 0)
+    return false;  // canonical scene not on the GPU yet
+  auto splatSet = m_assets.splatSets.getSplatSet(0);
+  if(!splatSet || splatSet->centersBuffer.buffer == VK_NULL_HANDLE)
+    return false;
+  const uint32_t sceneSplats = uint32_t(splatSet->positions.size() / 3);
+  if(sceneSplats == 0)
+    return false;
+
+  // Dedicated transfer command pool for the keyframe uploads
+  const auto queueEntry = m_app->getQueue(0);
+  if(m_dynamicCommandPool == VK_NULL_HANDLE)
+  {
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = queueEntry.familyIndex;
+    NVVK_CHECK(vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_dynamicCommandPool));
+    NVVK_DBG_NAME(m_dynamicCommandPool);
+  }
+
+  // Keyframe pool budget: hard cap at 2 GiB (window slides beyond that)
+  const size_t poolBudget = size_t(2ULL * 1024 * 1024 * 1024);
+  if(!m_dynamicSequence.open(m_app->getPhysicalDevice(), m_device, queueEntry.queue, m_dynamicCommandPool,
+                             m_dynamicSequencePath, poolBudget))
+  {
+    LOGE("Failed to open dynamic 4DGS sequence %s\n", m_dynamicSequencePath.c_str());
+    m_dynamicSequenceRequested = false;
+    return false;
+  }
+  if(m_dynamicSequence.info().splatCount != sceneSplats)
+    LOGW("Dynamic sequence splat count %u != scene splat count %u; animating the first %u\n",
+         m_dynamicSequence.info().splatCount, sceneSplats,
+         std::min(m_dynamicSequence.info().splatCount, sceneSplats));
+
+  // Coordinate-space sanity check: the .dgs positions must live in the same
+  // space as the loaded canonical buffer (post RDF->RUB conversion). Compare
+  // bounding boxes; a large mismatch means the exporter skipped the flip and
+  // the animated splats would land mirrored/wrong.
+  {
+    // Host-side check uses the canonical host copy vs the sequence file's
+    // first frame, both read back on the fly (small: 3 floats per splat).
+    std::vector<float> raw0(size_t(m_dynamicSequence.info().splatCount) * 3U);
+    {
+      std::ifstream f(m_dynamicSequencePath, std::ios::binary);
+      if(f)
+      {
+        uint64_t firstFrameOffset = 0;
+        f.seekg(64, std::ios::beg);
+        f.read(reinterpret_cast<char*>(&firstFrameOffset), sizeof(firstFrameOffset));
+        if(f)
+        {
+          f.seekg(std::streamoff(firstFrameOffset), std::ios::beg);
+          f.read(reinterpret_cast<char*>(raw0.data()),
+                 std::streamsize(raw0.size() * sizeof(float)));
+        }
+      }
+    }
+    const std::vector<float>& canon = splatSet->positions;
+    if(raw0.size() >= 3 && canon.size() >= 3)
+    {
+      auto bbox = [](const std::vector<float>& p, size_t count) {
+        glm::vec3 lo(1e30f), hi(-1e30f);
+        for(size_t i = 0; i < count; ++i)
+          for(int c = 0; c < 3; ++c)
+          {
+            lo[c] = std::min(lo[c], p[i * 3 + c]);
+            hi[c] = std::max(hi[c], p[i * 3 + c]);
+          }
+        return std::pair<glm::vec3, glm::vec3>{lo, hi};
+      };
+      const size_t n     = std::min(raw0.size() / 3, canon.size() / 3);
+      const auto   [rlo, rhi] = bbox(raw0, n);
+      const auto   [clo, chi] = bbox(canon, n);
+      const float  rawExtent  = glm::compMax(rhi - rlo);
+      const float  canonExtent = glm::compMax(chi - clo);
+      const float  centerDist  = glm::length((rlo + rhi) * 0.5f - (clo + chi) * 0.5f);
+      if(centerDist > 0.5f * std::max(rawExtent, canonExtent)
+         || std::abs(rawExtent - canonExtent) > 0.25f * std::max(rawExtent, canonExtent))
+        LOGW("Dynamic sequence coordinate space looks WRONG: seq bbox extent %.2f center (%.2f,%.2f,%.2f) vs "
+             "canonical extent %.2f center (%.2f,%.2f,%.2f) - re-export the .dgs or expect mirrored/garbled motion\n",
+             rawExtent, (rlo.x + rhi.x) * 0.5f, (rlo.y + rhi.y) * 0.5f, (rlo.z + rhi.z) * 0.5f,
+             canonExtent, (clo.x + chi.x) * 0.5f, (clo.y + chi.y) * 0.5f, (clo.z + chi.z) * 0.5f);
+      else
+        LOGI("Dynamic sequence coordinate space matches canonical (extent %.2f vs %.2f, centers %.3f apart)\n",
+             rawExtent, canonExtent, centerDist);
+    }
+  }
+
+  // Bind both the uploaded keyframe pool (binding 0) and live centers
+  // (binding 1). Leaving binding 0 unwritten made the compute shader read an
+  // unbound descriptor, which produced invalid positions.
+  VkDescriptorBufferInfo bufferInfos[2] = {
+      {m_dynamicSequence.poolBuffer(), 0, VK_WHOLE_SIZE},
+      {splatSet->centersBuffer.buffer, 0, VK_WHOLE_SIZE},
+  };
+  VkWriteDescriptorSet writes[2]{};
+  for(uint32_t binding = 0; binding < 2; ++binding)
+  {
+    writes[binding].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[binding].dstSet          = m_descriptorSetAnimate;
+    writes[binding].dstBinding      = binding;
+    writes[binding].descriptorCount = 1;
+    writes[binding].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[binding].pBufferInfo     = &bufferInfos[binding];
+  }
+  vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+
+  m_sequenceStartSeconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  m_dynamicSequenceOpen = true;
+  m_sortDirty           = true;  // the first animate dispatch rewrites positions
+  // Reset the blend cache: the live centers buffer now tracks the sequence.
+  m_lastAnimateCount = 0;
+  m_lastAnimateAlpha = -1.0F;
+  LOGI("Dynamic 4DGS sequence open: %u keyframes @ %.1f fps (%.2f s loop), %u splats, %.1f MB VRAM\n",
+       m_dynamicSequence.info().frameCount, m_dynamicSequence.info().fps,
+       double(m_dynamicSequence.info().frameCount) / double(m_dynamicSequence.info().fps),
+       m_dynamicSequence.info().splatCount, double(m_dynamicSequence.info().vramBytes) / (1024.0 * 1024.0));
+  return true;
+}
+
+void GaussianSplatting::initializeTrainingCamera()
+{
+  if(!m_trainingCameraRequested)
+    return;
+
+  std::vector<Camera> trainingCameras;
+  std::string        error;
+  if(!loadDynamic3GSTrainingCameraTrack(m_trainingCameraMetadataPath, m_trainingCameraIndex,
+                                        trainingCameras, &error))
+  {
+    LOGW("Could not load training camera metadata %s: %s\n", m_trainingCameraMetadataPath.c_str(), error.c_str());
+    m_trainingCameraRequested = false;
+    return;
+  }
+
+  if(trainingCameras.empty())
+    return;
+
+  // Dynamic3DGaussians uses a fixed camera per index for this sequence. Start
+  // at the first training frame, then leave CameraManipulator in control so
+  // trackball and keyboard movement work immediately.
+  m_assets.cameras.setCamera(trainingCameras.front(), true);
+  LOGI("Initialized with training camera %u from %s; manual camera input is enabled.\n", m_trainingCameraIndex,
+       m_trainingCameraMetadataPath.c_str());
+}
+
+void GaussianSplatting::destroyDynamicAnimate()
+{
+  m_dynamicSequence.close();
+  if(m_computePipelineAnimate != VK_NULL_HANDLE)
+    vkDestroyPipeline(m_device, m_computePipelineAnimate, nullptr);
+  if(m_pipelineLayoutAnimate != VK_NULL_HANDLE)
+    vkDestroyPipelineLayout(m_device, m_pipelineLayoutAnimate, nullptr);
+  if(m_descriptorPoolAnimate != VK_NULL_HANDLE)
+    vkDestroyDescriptorPool(m_device, m_descriptorPoolAnimate, nullptr);
+  if(m_descriptorSetLayoutAnimate != VK_NULL_HANDLE)
+    vkDestroyDescriptorSetLayout(m_device, m_descriptorSetLayoutAnimate, nullptr);
+  if(m_dynamicCommandPool != VK_NULL_HANDLE)
+    vkDestroyCommandPool(m_device, m_dynamicCommandPool, nullptr);
+  m_computePipelineAnimate     = VK_NULL_HANDLE;
+  m_pipelineLayoutAnimate      = VK_NULL_HANDLE;
+  m_descriptorSetAnimate       = VK_NULL_HANDLE;
+  m_descriptorPoolAnimate      = VK_NULL_HANDLE;
+  m_descriptorSetLayoutAnimate = VK_NULL_HANDLE;
+  m_dynamicCommandPool         = VK_NULL_HANDLE;
+  m_dynamicSequenceOpen        = false;
+}
+
+void GaussianSplatting::initDynamicAnimate()
+{
+  if(m_shaders.animateShader == VK_NULL_HANDLE)
+    return;  // soft: dynamic playback disabled, renderer unaffected
+  LOGI("DYN: init begin\n");
+
+  m_descriptorBindingsAnimate.clear();
+  m_descriptorBindingsAnimate.addBinding(DYN_BINDING_KEYFRAME_POOL, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_COMPUTE_BIT);
+  m_descriptorBindingsAnimate.addBinding(DYN_BINDING_OUT_CENTERS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_COMPUTE_BIT);
+  NVVK_CHECK(m_descriptorBindingsAnimate.createDescriptorSetLayout(m_device, 0, &m_descriptorSetLayoutAnimate));
+  NVVK_DBG_NAME(m_descriptorSetLayoutAnimate);
+  LOGI("DYN: layout ok\n");
+
+  VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2};
+  VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  poolInfo.maxSets       = 1;
+  poolInfo.poolSizeCount = 1;
+  poolInfo.pPoolSizes    = &poolSize;
+  NVVK_CHECK(vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPoolAnimate));
+  NVVK_DBG_NAME(m_descriptorPoolAnimate);
+  LOGI("DYN: pool ok\n");
+
+  VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+  allocInfo.descriptorPool = m_descriptorPoolAnimate;
+  allocInfo.descriptorSetCount = 1;
+  allocInfo.pSetLayouts = &m_descriptorSetLayoutAnimate;
+  NVVK_CHECK(vkAllocateDescriptorSets(m_device, &allocInfo, &m_descriptorSetAnimate));
+  NVVK_DBG_NAME(m_descriptorSetAnimate);
+  LOGI("DYN: set ok\n");
+
+  const VkPushConstantRange pcRange = {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(DynamicAnimatePush)};
+  VkPipelineLayoutCreateInfo plCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  plCreateInfo.setLayoutCount         = 1;
+  plCreateInfo.pSetLayouts            = &m_descriptorSetLayoutAnimate;
+  plCreateInfo.pushConstantRangeCount = 1;
+  plCreateInfo.pPushConstantRanges    = &pcRange;
+  NVVK_CHECK(vkCreatePipelineLayout(m_device, &plCreateInfo, nullptr, &m_pipelineLayoutAnimate));
+  NVVK_DBG_NAME(m_pipelineLayoutAnimate);
+  LOGI("DYN: pipeline layout ok\n");
+
+  VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+  pipelineInfo.stage  = {.sType    = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                         .stage    = VK_SHADER_STAGE_COMPUTE_BIT,
+                         .module   = m_shaders.animateShader,
+                         .pName    = "main"};
+  pipelineInfo.layout = m_pipelineLayoutAnimate;
+  LOGI("DYN: creating compute pipeline\n");
+  NVVK_CHECK(vkCreateComputePipelines(m_device, m_pipelineCache, 1, &pipelineInfo, nullptr, &m_computePipelineAnimate));
+  NVVK_DBG_NAME(m_computePipelineAnimate);
+  LOGI("DYN: compute pipeline ok\n");
+}
+
+void GaussianSplatting::animateDynamicSplats(VkCommandBuffer cmd, uint32_t splatCount)
+{
+  if(m_computePipelineAnimate == VK_NULL_HANDLE || !m_dynamicSequence.isOpen())
+    return;
+
+  const uint32_t n = std::min(splatCount, m_dynamicSequence.info().splatCount);
+  if(n == 0)
+    return;
+
+  const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  // A/B diagnostic: CSAGS_DYN_STATIC=1 pins the blend to keyframe 0 with
+  // alpha=0 (rewrite canonical positions every frame). If the scene then
+  // renders correctly, the write path is sound and the .dgs data is suspect.
+  static const bool forceStatic = []() {
+    const char* env = getenv("CSAGS_DYN_STATIC");
+    return env != nullptr && env[0] == '1';
+  }();
+  if(!m_dynamicSequence.update(forceStatic ? 0.0 : now - m_sequenceStartSeconds))
+    return;
+
+  const VkDeviceSize k0ByteOffset = m_dynamicSequence.keyframeBufferOffset(0);
+  const VkDeviceSize k1ByteOffset = m_dynamicSequence.keyframeBufferOffset(1);
+  const uint32_t     k0FloatOffset = uint32_t(k0ByteOffset / sizeof(float));
+  const uint32_t     k1FloatOffset = uint32_t(k1ByteOffset / sizeof(float));
+  const float        a = forceStatic ? 0.0f : m_dynamicSequence.alpha();
+
+  // Identical blend parameters rewrite identical contents: skip the dispatch
+  // and the sorted-order invalidation it would trigger.
+  if(n == m_lastAnimateCount && a == m_lastAnimateAlpha && k0FloatOffset == m_lastAnimateKey0
+     && k1FloatOffset == m_lastAnimateKey1)
+    return;
+  m_lastAnimateCount = n;
+  m_lastAnimateAlpha = a;
+  m_lastAnimateKey0  = k0FloatOffset;
+  m_lastAnimateKey1  = k1FloatOffset;
+  m_sortDirty        = true;  // splat positions changed
+
+  // NOTE: no profiler section here on purpose — cmdFrameSection interacts
+  // badly with the app-close teardown (crash at headlessFrameCount + 1).
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_computePipelineAnimate);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipelineLayoutAnimate, 0, 1,
+                          &m_descriptorSetAnimate, 0, nullptr);
+  const DynamicAnimatePush push{k0FloatOffset, k1FloatOffset, a, n};
+  vkCmdPushConstants(cmd, m_pipelineLayoutAnimate, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+  vkCmdDispatch(cmd, (n + 255) / 256, 1, 1);
+
+  // Centers are rewritten by this pass: make the new positions visible to the
+  // sorting (compute) and rasterization (vertex/mesh) stages that follow.
+  VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+  barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+  barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+  barrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT
+                         | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+  barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+  VkDependencyInfo depInfo{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+  depInfo.memoryBarrierCount = 1;
+  depInfo.pMemoryBarriers    = &barrier;
+  vkCmdPipelineBarrier2(cmd, &depInfo);
 }
 
 void GaussianSplatting::postProcess(VkCommandBuffer cmd)

@@ -54,47 +54,16 @@ file(GLOB SHADER_FILES src/shaders/*.slang src/shaders/*.h)
 file(GLOB EXTERN_FILES third_party/miniply/*.*)
 
 list(REMOVE_ITEM SOURCE_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/test.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
 )
 
-set(CURVED_STEREO_GS_MAIN1_SOURCE_FILES ${SOURCE_FILES})
-set(CURVED_STEREO_GS_KZ_SOURCE_FILES ${SOURCE_FILES})
-set(CURVED_STEREO_GS_NV_SOURCE_FILES ${SOURCE_FILES})
-list(REMOVE_ITEM SOURCE_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main1.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main2.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/mainnv.cpp
-)
-list(REMOVE_ITEM CURVED_STEREO_GS_MAIN1_SOURCE_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main2.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/mainnv.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/active_stereo_presenter.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/active_stereo_presenter.h
-)
-list(REMOVE_ITEM CURVED_STEREO_GS_KZ_SOURCE_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main1.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/mainnv.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/active_stereo_presenter.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/active_stereo_presenter.h
-)
-list(REMOVE_ITEM CURVED_STEREO_GS_NV_SOURCE_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main1.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main2.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/active_stereo_presenter.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/active_stereo_presenter.h
-)
-
-set(CURVED_STEREO_GS_TEST_SOURCE_FILES ${SOURCE_FILES})
-list(REMOVE_ITEM CURVED_STEREO_GS_TEST_SOURCE_FILES
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp
-)
+# The renderer ships as a single executable. The old upstream sample had several
+# alternative entry points (main1/main2/mainnv) plus a textured-quad test
+# (src/test.cpp); all of them were removed, so there is nothing left to build
+# besides CurvedStereoGS itself, the Qt control center and the unit tests.
 
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/src 
@@ -113,51 +82,6 @@ set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT $
 
 target_compile_definitions(${CURVED_STEREO_GS_RENDERER_TARGET} PRIVATE IMGUI_DEFINE_MATH_OPERATORS )
 target_compile_definitions(${CURVED_STEREO_GS_RENDERER_TARGET} PRIVATE CURVED_STEREO_GS_VERSION="${CURVED_STEREO_GS_VERSION}")
-
-add_executable(CurvedStereoGS_Main1
-  ${CURVED_STEREO_GS_MAIN1_SOURCE_FILES}
-  ${COMMON_SOURCE_FILES}
-  ${PACKAGE_SOURCE_FILES}
-  ${SHADER_FILES}
-  ${EXTERN_FILES}
-)
-
-target_compile_definitions(CurvedStereoGS_Main1 PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
-target_compile_definitions(CurvedStereoGS_Main1 PRIVATE CURVED_STEREO_GS_VERSION="${CURVED_STEREO_GS_VERSION}")
-
-add_executable(CurvedStereoGS_KZ
-  ${CURVED_STEREO_GS_KZ_SOURCE_FILES}
-  ${COMMON_SOURCE_FILES}
-  ${PACKAGE_SOURCE_FILES}
-  ${SHADER_FILES}
-  ${EXTERN_FILES}
-)
-
-target_compile_definitions(CurvedStereoGS_KZ PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
-target_compile_definitions(CurvedStereoGS_KZ PRIVATE CURVED_STEREO_GS_VERSION="${CURVED_STEREO_GS_VERSION}")
-
-add_executable(CurvedStereoGS_NV
-  ${CURVED_STEREO_GS_NV_SOURCE_FILES}
-  ${COMMON_SOURCE_FILES}
-  ${PACKAGE_SOURCE_FILES}
-  ${SHADER_FILES}
-  ${EXTERN_FILES}
-)
-
-target_compile_definitions(CurvedStereoGS_NV PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
-target_compile_definitions(CurvedStereoGS_NV PRIVATE CURVED_STEREO_GS_VERSION="${CURVED_STEREO_GS_VERSION}")
-
-add_executable(CurvedStereoGS_Test
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/test.cpp
-  ${CURVED_STEREO_GS_TEST_SOURCE_FILES}
-  ${COMMON_SOURCE_FILES}
-  ${PACKAGE_SOURCE_FILES}
-  ${SHADER_FILES}
-  ${EXTERN_FILES}
-)
-
-target_compile_definitions(CurvedStereoGS_Test PRIVATE IMGUI_DEFINE_MATH_OPERATORS)
-target_compile_definitions(CurvedStereoGS_Test PRIVATE CURVED_STEREO_GS_VERSION="${CURVED_STEREO_GS_VERSION}")
 
 #####################################################################################
 # common source code needed for this sample
@@ -186,63 +110,6 @@ target_link_libraries(${CURVED_STEREO_GS_RENDERER_TARGET} PRIVATE
   nvpro2::nvvk
   nvpro2::nvgpu_monitor
   gl_headers
-  OpenGL::GL
-  vk_radix_sort
-  spz::spz
-  tinygltf
-)
-
-target_link_libraries(CurvedStereoGS_Main1 PRIVATE
-  nvpro2::nvapp
-
-  nvpro2::nvvkglsl
-  nvpro2::nvslang
-  nvpro2::nvshaders_host
-  nvpro2::nvutils
-  nvpro2::nvvk
-  nvpro2::nvgpu_monitor
-  vk_radix_sort
-  spz::spz
-  tinygltf
-)
-
-target_link_libraries(CurvedStereoGS_KZ PRIVATE
-  nvpro2::nvapp
-
-  nvpro2::nvvkglsl
-  nvpro2::nvslang
-  nvpro2::nvshaders_host
-  nvpro2::nvutils
-  nvpro2::nvvk
-  nvpro2::nvgpu_monitor
-  vk_radix_sort
-  spz::spz
-  tinygltf
-)
-
-target_link_libraries(CurvedStereoGS_NV PRIVATE
-  nvpro2::nvapp
-
-  nvpro2::nvvkglsl
-  nvpro2::nvslang
-  nvpro2::nvshaders_host
-  nvpro2::nvutils
-  nvpro2::nvvk
-  nvpro2::nvgpu_monitor
-  vk_radix_sort
-  spz::spz
-  tinygltf
-)
-
-target_link_libraries(CurvedStereoGS_Test PRIVATE
-  nvpro2::nvapp
-
-  nvpro2::nvvkglsl
-  nvpro2::nvslang
-  nvpro2::nvshaders_host
-  nvpro2::nvutils
-  nvpro2::nvvk
-  nvpro2::nvgpu_monitor
   OpenGL::GL
   vk_radix_sort
   spz::spz
@@ -280,10 +147,6 @@ if(CURVED_STEREO_GS_BUILD_QT_CONTROL_CENTER)
 endif()
 
 add_project_definitions(${CURVED_STEREO_GS_RENDERER_TARGET})
-add_project_definitions(CurvedStereoGS_Main1)
-add_project_definitions(CurvedStereoGS_KZ)
-add_project_definitions(CurvedStereoGS_NV)
-add_project_definitions(CurvedStereoGS_Test)
 
 #####################################################################################
 # Adding DLSS if selected
@@ -291,35 +154,11 @@ if(USE_DLSS)
   set(DLSS_VERSION "310.5.0")
   find_package(NGX REQUIRED)
   target_link_libraries(${CURVED_STEREO_GS_RENDERER_TARGET} PRIVATE ngx)
-  target_link_libraries(CurvedStereoGS_Main1 PRIVATE ngx)
-  target_link_libraries(CurvedStereoGS_KZ PRIVATE ngx)
-  target_link_libraries(CurvedStereoGS_NV PRIVATE ngx)
   target_compile_definitions(${CURVED_STEREO_GS_RENDERER_TARGET} PRIVATE USE_DLSS)
-  target_compile_definitions(CurvedStereoGS_Main1 PRIVATE USE_DLSS)
-  target_compile_definitions(CurvedStereoGS_KZ PRIVATE USE_DLSS)
-  target_compile_definitions(CurvedStereoGS_NV PRIVATE USE_DLSS)
   target_sources(${CURVED_STEREO_GS_RENDERER_TARGET} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp 
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp 
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
-  )
-  target_sources(CurvedStereoGS_Main1 PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
-  )
-  target_sources(CurvedStereoGS_KZ PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
-  )
-  target_sources(CurvedStereoGS_NV PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_wrapper.hpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/dlss_denoiser.hpp
   )
 endif()
@@ -335,30 +174,34 @@ copy_to_runtime_and_install(${CURVED_STEREO_GS_RENDERER_TARGET}
   AUTO
 )
 
-copy_to_runtime_and_install(CurvedStereoGS_Main1
-  DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
-  AUTO
-)
+#####################################################################################
+# Tests
+#
+# The tests are CPU-only so they can run on a machine without a GPU (and in CI):
+#  * CurvedStereoGS_UnitTests exercises the StereoFrameStats accumulator/CSV writer.
+#  * benchmark_report_tool validates tools/analyze_stereo_benchmark.py with unittest.
+# Run them with:  ctest --test-dir <build-dir> -C Release --output-on-failure
+option(CURVED_STEREO_GS_BUILD_TESTS "Build the CPU-only unit tests" ON)
 
-copy_to_runtime_and_install(CurvedStereoGS_KZ
-  DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
-  AUTO
-)
+if(CURVED_STEREO_GS_BUILD_TESTS)
+  enable_testing()
 
-copy_to_runtime_and_install(CurvedStereoGS_NV
-  DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${Slang_GLSLANG} ${DLSS_DLLS}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
-  AUTO
-)
+  add_executable(CurvedStereoGS_UnitTests
+    tests/test_stereo_frame_stats.cpp
+    src/stereo_frame_stats.cpp
+  )
+  target_include_directories(CurvedStereoGS_UnitTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+  target_link_libraries(CurvedStereoGS_UnitTests PRIVATE nvpro2::nvutils)
+  add_test(NAME stereo_frame_stats COMMAND CurvedStereoGS_UnitTests)
 
-copy_to_runtime_and_install(CurvedStereoGS_Test
-  DIRECTORIES "${NVSHADERS_DIR}/nvshaders"
-  FILES ${Slang_GLSLANG}
-  LOCAL_DIRS "${CMAKE_CURRENT_LIST_DIR}/src/shaders"
-  AUTO
-)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME benchmark_report_tool
+      COMMAND ${Python3_EXECUTABLE} -m unittest discover
+              -s "${CMAKE_CURRENT_SOURCE_DIR}/tests" -p "test_*.py")
+    set_tests_properties(benchmark_report_tool PROPERTIES
+      WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}")
+  else()
+    message(STATUS "Python3 not found: the benchmark report tool test is skipped")
+  endif()
+endif()

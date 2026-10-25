@@ -3,7 +3,9 @@
 /_bin/
 /_install/
 /_downloaded_resources/
+/artifacts/
 /build/
+/bin/
 /cmake-build-*/
 /.vs/
 CMakeCache.txt
@@ -16,6 +18,13 @@ CMakeFiles/
 *.log
 *.ini
 
+# Python caches from the tools/ scripts
+__pycache__/
+*.pyc
+
+# Scratch captures kept only on the developer machine
+/_bench/
+
 # Generated shader headers and dependency files
 /third_party/vrdx/src/generated/
 
@@ -27,3 +36,19 @@ CMakeFiles/
 *.splat
 *.csgs
 *.vkgs
+
+# Dynamic 4DGS sequence assets (large, locally generated)
+/assets/
+!/assets/
+/assets/*
+!/assets/training_cameras/
+/assets/training_cameras/*
+!/assets/training_cameras/*/
+/assets/training_cameras/*/*
+!/assets/training_cameras/*/train_meta.json
+*.dgs
+
+# Personal files and local tool state - never push
+/简历/
+/.zcode/
+/.vscode/

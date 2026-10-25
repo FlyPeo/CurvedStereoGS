@@ -1,0 +1,85 @@
+---
+# CurvedStereoGS code style.
+#
+# The project is derived from the NVIDIA nvpro_core2 / vk_gaussian_splatting
+# samples, so this file intentionally mirrors the upstream style in
+# third_party/nvpro_core2/.clang-format to keep diffs small. The only deliberate
+# differences are the column limit (the stereo presentation code lines up at
+# 150 columns) and the C++20 language level used by the Qt control center.
+#
+# Usage:
+#   clang-format -i src/*.cpp src/*.h src/*.hpp src/shaders/*.slang
+#   git clang-format            # format only the lines you changed
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+# Indentation and alignment
+AccessModifierOffset: -2
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: true
+AlignConsecutiveDeclarations: true
+AlignOperands: true
+AlignTrailingComments: true
+
+# Function and parameter formatting
+AllowAllParametersOfDeclarationOnNextLine: false
+AllowShortBlocksOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+
+# Line breaking and wrapping
+AlwaysBreakAfterReturnType: None
+AlwaysBreakBeforeMultilineStrings: true
+AlwaysBreakTemplateDeclarations: true
+BinPackArguments: true
+BinPackParameters: false
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeBraces: Custom
+BreakBeforeTernaryOperators: false
+BreakConstructorInitializersBeforeComma: true
+
+# Column and line limits
+ColumnLimit: 150
+ConstructorInitializerAllOnOneLineOrOnePerLine: false
+Cpp11BracedListStyle: true
+IndentCaseLabels: true
+IndentWidth: 2
+KeepEmptyLinesAtTheStartOfBlocks: true
+MaxEmptyLinesToKeep: 2
+
+# Namespace and pointer formatting
+NamespaceIndentation: None
+PointerAlignment: Left
+
+# Spacing rules
+SpaceAfterCStyleCast: false
+SpaceBeforeAssignmentOperators: true
+SpaceBeforeParens: Never
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 2
+SpacesInAngles: false
+SpacesInCStyleCastParentheses: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+# Custom brace breaking, matching the Allman style used across the code base.
+BraceWrapping:
+  AfterCaseLabel: false
+  AfterClass: true
+  AfterControlStatement: false
+  AfterEnum: true
+  AfterFunction: true
+  AfterNamespace: true
+  AfterStruct: true
+  AfterUnion: true
+  BeforeCatch: true
+  BeforeElse: true
+  IndentBraces: false
+  SplitEmptyFunction: false
+  SplitEmptyRecord: false
+  SplitEmptyNamespace: false
+
+SortIncludes: false

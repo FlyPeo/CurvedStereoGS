@@ -202,6 +202,14 @@ void main(
       return;
     }
 
+    const SplatRevealState reveal = getSplatRevealState(frameInfo, splatSetDesc, splatCenter);
+    splatColor.a *= reveal.opacity;
+    if(splatColor.a < frameInfo.alphaCullThreshold)
+    {
+      emitDegeneratedQuad(localIndex, verts);
+      return;
+    }
+
 #if MESH_SHADER_PER_PRIMITIVE_ATTRIBS && MS_ANTIALIASING == 0
     // emit per-primitive color as early as possible for perf reasons (MipSplatting compensates the
     // alpha later, so its color is emitted after the extent computation instead)
@@ -263,6 +271,9 @@ void main(
       emitDegeneratedQuad(localIndex, verts);
       return;
     }
+    extent *= reveal.scale;
+    if(reveal.scale < 0.999)
+      extent = max(extent, float2(0.55));
 
 #if MS_ANTIALIASING == 1
     splatColor.a = conicOpacity.a;
@@ -278,6 +289,7 @@ void main(
       emitDegeneratedQuad(localIndex, verts);
       return;
     }
+    applySplatRevealScale(basisVector1, basisVector2, reveal.scale);
 #endif
 
 #if MESH_SHADER_PER_PRIMITIVE_ATTRIBS && MS_ANTIALIASING == 1

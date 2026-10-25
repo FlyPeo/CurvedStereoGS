@@ -21,11 +21,15 @@
 #include "elem_camera_custom.hpp"
 #include "gaussian_splatting_app.h"
 #include "hardware_support.h"
+#include "stereo_frame_stats.h"
 #include "stereo_interop_vk.h"
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
+#include <algorithm>
 #include <array>
+#include <cstdint>
+#include <string_view>
 #undef APIENTRY
 
 #if USE_DLSS
@@ -39,15 +43,42 @@ namespace {
 std::filesystem::path getDefaultScenePath()
 {
   const std::filesystem::path exeDir = nvutils::getExecutablePath().parent_path();
-  const std::filesystem::path sourceScene = std::filesystem::path(TARGET_EXE_TO_SOURCE_DIRECTORY) / "models" / "point_cloud.ply";
 
-  if(std::filesystem::exists(exeDir / sourceScene))
-    return sourceScene;
+  // Layered model layout, checked first: models/static/ holds plain scenes,
+  // models/dynamic/ holds canonical .ply + matching .dgs + training_cameras/.
+  // Scanning dynamic before static prefers the richer scene when both exist;
+  // name-sorted first non-empty match keeps the choice deterministic. Covers
+  // both the portable layout (models/ next to the executable) and the
+  // development tree (models/ at the repository root).
+  const std::filesystem::path sourceRoot = std::filesystem::path(TARGET_EXE_TO_SOURCE_DIRECTORY);
+  for(const std::filesystem::path& base : {exeDir, exeDir / sourceRoot, exeDir / ".." / sourceRoot})
+  {
+    for(const std::filesystem::path& folder :
+        {base / "models" / "dynamic", base / "models" / "static", base / "models"})
+    {
+      std::error_code                    ec;
+      std::vector<std::filesystem::path> candidates;
+      for(std::filesystem::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec))
+      {
+        if(!it->is_regular_file() || it->file_size(ec) == 0)
+          continue;
+        std::string ext = it->path().extension().string();
+        for(char& c : ext)
+          c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if(ext == ".ply" || ext == ".spz" || ext == ".csgs" || ext == ".vkgs")
+          candidates.push_back(it->path());
+      }
+      std::sort(candidates.begin(), candidates.end());
+      if(!candidates.empty())
+        return candidates.front();
+    }
+  }
 
-  const std::filesystem::path multiConfigScene = std::filesystem::path("..") / sourceScene;
-  if(std::filesystem::exists(exeDir / multiConfigScene))
-    return multiConfigScene;
+  const std::filesystem::path temporalSample = sourceRoot / "assets" / "basketball_canonical.ply";
+  if(std::filesystem::exists(exeDir / temporalSample))
+    return temporalSample;
 
+  const std::filesystem::path sourceScene = sourceRoot / "models" / "point_cloud.ply";
   return sourceScene;
 }
 
@@ -74,8 +105,8 @@ bool getPrimaryMonitorResolution(glm::uvec2& resolution)
 
 void requestStereoToggle(const std::shared_ptr<GaussianSplattingApp>& gaussianSplatting);
 
-bool  gQuadBufferStereoSwitch        = true;
 float gQuadBufferStereoEyeSeparation = 0.065f;
+bool  gQuadBufferStereoSwitch        = true;  // true = stereo, false = zero parallax
 
 struct SideBySideOutput
 {
@@ -228,12 +259,62 @@ private:
   bool                                  m_wasStereoToggleKeyDown{false};
 };
 
+// Exits the application when ESC is pressed in the render window.
+class ExitHotkeysElement : public nvapp::IAppElement
+{
+public:
+  void onAttach(nvapp::Application* app) override { m_app = app; }
+
+  void onUIRender() override { handleExitHotkey(); }
+
+  void onPreRender() override { handleExitHotkey(); }
+
+private:
+  void handleExitHotkey()
+  {
+    const bool isDown = isExitKeyDown();
+    if(isDown && !m_wasExitKeyDown)
+    {
+      LOGI("ESC pressed - closing the renderer.\n");
+      if(m_app != nullptr)
+        m_app->close();
+    }
+    m_wasExitKeyDown = isDown;
+  }
+
+  bool isExitKeyDown() const
+  {
+    if(m_app != nullptr && m_app->getWindowHandle() != nullptr)
+      return glfwGetKey(m_app->getWindowHandle(), GLFW_KEY_ESCAPE) == GLFW_PRESS;
+    return ImGui::IsKeyDown(ImGuiKey_Escape);
+  }
+
+  nvapp::Application* m_app{nullptr};
+  bool                m_wasExitKeyDown{false};
+};
+
 void requestStereoToggle(const std::shared_ptr<GaussianSplattingApp>& gaussianSplatting)
 {
-  prmStereo.enabled   = true;
   prmStereo.mode      = STEREO_MODE_MULTIVIEW;
   prmStereo.activeEye = STEREO_EYE_CENTER;
 
+  if(!prmStereo.enabled)
+  {
+    // Mono start (single-layer targets): enabling stereo needs the G-buffer /
+    // pipeline rebuild path - a one-time hitch, after which toggles below are
+    // instant flips of the eye separation.
+    prmStereo.enabled = true;
+    if(prmStereo.eyeSeparation <= 1.0e-5F)
+      prmStereo.eyeSeparation = gQuadBufferStereoEyeSeparation;
+    gQuadBufferStereoSwitch = true;
+    gaussianSplatting->requestStereoModeRebuild();
+    LOGI("Stereo hotkey 0: stereo enabled, rebuilding the viewport targets and pipelines.\n");
+    return;
+  }
+
+  // Zero-parallax toggle (upstream semantics): multiview targets and pipelines
+  // stay alive, only the eye separation flips between the calibrated value and
+  // 0 - instant, no rebuild.
   if(gQuadBufferStereoSwitch && prmStereo.eyeSeparation > 1.0e-5F)
     gQuadBufferStereoEyeSeparation = prmStereo.eyeSeparation;
 
@@ -241,10 +322,9 @@ void requestStereoToggle(const std::shared_ptr<GaussianSplattingApp>& gaussianSp
   prmStereo.eyeSeparation = gQuadBufferStereoSwitch ? gQuadBufferStereoEyeSeparation : 0.0F;
   gaussianSplatting->requestFrameReset();
 
-  LOGI(
-      "Stereo hotkey 0: stereo output stays enabled, %s eye separation "
-      "%.3fm.\n",
-      gQuadBufferStereoSwitch ? "restored stereo" : "using mono", prmStereo.eyeSeparation);
+  LOGI("Stereo hotkey 0: %s eye separation %.3fm.\n",
+       gQuadBufferStereoSwitch ? "restored stereo" : "zero parallax (mono content)",
+       prmStereo.eyeSeparation);
 }
 
 }  // namespace
@@ -274,6 +354,8 @@ int main(int argc, char** argv)
   bool                         activeStereoOnlyWindow       = true;
   bool                         activeStereoGpuInteropEnabled = true;
   int                          stereoOutputMode = 0;  // 0=auto, 1=WGL quad-buffer, 2=Vulkan side-by-side.
+  std::string                  stereoStatsCsv;             // optional per-frame CSV of stereo presentation timings
+  uint32_t                     stereoStatsInterval = 300;  // running summary every N frames (0=off)
 
   // Use the OSG-style curved screen path by default in the main executable.
   // Pass 1 renders the scene with an off-axis frustum for the virtual flat
@@ -300,8 +382,8 @@ int main(int argc, char** argv)
   parameterRegistry.add({"vsync"}, &appInfo.vSync);
   parameterRegistry.add({"headless", "Run without a window (no swapchain, no display)"}, &appInfo.headless);
   parameterRegistry.add({"headlessFrameCount",
-                         "Number of frames to render in headless mode "
-                         "(ignored when --benchmark is enabled)"},
+                         "Number of frames to render in headless mode, or to "
+                         "auto-close a windowed run after N frames"},
                         &appInfo.headlessFrameCount);
   parameterRegistry.add({"verbose", "Verbose output of the Vulkan context"}, &vkSetup.verbose);
   parameterRegistry.add({"validation", "Enable validation layers"}, &vkSetup.enableValidationLayers);
@@ -321,10 +403,25 @@ int main(int argc, char** argv)
                         &activeStereoGpuInteropEnabled);
   parameterRegistry.add({"stereoOutputMode", "0=auto (quad-buffer then Vulkan side-by-side), 1=quad-buffer only, 2=Vulkan side-by-side"},
                         &stereoOutputMode);
+  parameterRegistry.add({"stereoStatsCsv", "Write per-frame stereo presentation CPU timings (milliseconds) to this CSV file"},
+                        &stereoStatsCsv);
+  parameterRegistry.add({"stereoStatsInterval", "Log a stereo frame-statistics summary every N frames (0 disables periodic reporting)"},
+                        &stereoStatsInterval);
 
   const std::string defaultSceneFile = getDefaultScenePath().generic_string();
   std::string       sceneFile        = defaultSceneFile;
   parameterRegistry.add({"scene", "Path to a .ply, .spz, .csgs, or legacy .vkgs file to load on startup"}, &sceneFile);
+  std::string dynamicSequenceFile = "";
+  parameterRegistry.add({"dynamicSequence", "Path to a .dgs dynamic 4DGS keyframe pack to play over the loaded scene"},
+                        &dynamicSequenceFile);
+  std::string trainingCameraMetadata = "";
+  parameterRegistry.add({"trainingCameraMetadata", "Dynamic3DGaussians train_meta.json used for the initial camera view"},
+                        &trainingCameraMetadata);
+  // Camera 8 is the frontal basketball training view; users can select any of
+  // the 27 calibrated cameras from the control center.
+  int32_t trainingCameraIndex = 8;
+  parameterRegistry.add({"trainingCameraIndex", "Camera index from the Dynamic3DGaussians training metadata"},
+                        &trainingCameraIndex);
 
   registerCommandLineParameters(&parameterRegistry);
 
@@ -355,9 +452,48 @@ int main(int argc, char** argv)
     LOGW("Unknown stereo output mode %d; using automatic output selection.\n", stereoOutputMode);
     stereoOutputMode = 0;
   }
-  prmStereo.enabled   = true;
+  StereoFrameStats::setReportInterval(stereoStatsInterval);
+  if(!stereoStatsCsv.empty())
+    StereoFrameStats::openCsv(stereoStatsCsv.c_str());
+  if(!dynamicSequenceFile.empty())
+    gaussianSplatting->setDynamicSequencePath(dynamicSequenceFile);
+
+  std::filesystem::path selectedScene = sceneFile == defaultSceneFile ? resolveDefaultScenePath(sceneFile)
+                                                                       : std::filesystem::path(sceneFile);
+  std::string sceneStem = selectedScene.stem().string();
+  constexpr std::string_view canonicalSuffix = "_canonical";
+  if(sceneStem.size() >= canonicalSuffix.size()
+     && sceneStem.compare(sceneStem.size() - canonicalSuffix.size(), canonicalSuffix.size(), canonicalSuffix) == 0)
+    sceneStem.resize(sceneStem.size() - canonicalSuffix.size());
+
+  if(dynamicSequenceFile.empty() && !sceneStem.empty())
+  {
+    const auto pairedSequence = selectedScene.parent_path() / (sceneStem + ".dgs");
+    if(std::filesystem::exists(pairedSequence))
+    {
+      gaussianSplatting->setDynamicSequencePath(pairedSequence.string());
+      LOGI("Using the matching dynamic 4DGS sequence: %s\n", pairedSequence.string().c_str());
+    }
+  }
+  if(trainingCameraMetadata.empty() && !sceneStem.empty())
+  {
+    const auto cameraMetadata = selectedScene.parent_path() / "training_cameras" / sceneStem / "train_meta.json";
+    if(std::filesystem::exists(cameraMetadata))
+      trainingCameraMetadata = cameraMetadata.string();
+  }
+  if(!trainingCameraMetadata.empty())
+  {
+    gaussianSplatting->setTrainingCameraMetadataPath(trainingCameraMetadata,
+                                                     uint32_t(std::max<int32_t>(trainingCameraIndex, 0)));
+  }
+  // The stereo pipeline is multiview-only; keep mode and active eye pinned,
+  // but let --stereo 0 opt out entirely for flat single-view rendering.
   prmStereo.mode      = STEREO_MODE_MULTIVIEW;
   prmStereo.activeEye = STEREO_EYE_CENTER;
+  if(!prmStereo.enabled)
+  {
+    LOGI("Stereo rendering disabled at startup; press 0 to enable stereo (one-time target rebuild).\n");
+  }
   if(prmStereo.eyeSeparation > 1.0e-5F)
   {
     gQuadBufferStereoEyeSeparation = prmStereo.eyeSeparation;
@@ -366,8 +502,6 @@ int main(int argc, char** argv)
   {
     prmStereo.eyeSeparation = gQuadBufferStereoEyeSeparation;
   }
-  gQuadBufferStereoSwitch = true;
-
   if(!appInfo.headless && appInfo.windowSize.x == 0 && appInfo.windowSize.y == 0)
   {
     glm::uvec2 monitorResolution{0, 0};
@@ -579,7 +713,11 @@ int main(int argc, char** argv)
   // gaussianSplatting onAttach will be invoked on elements at this stage
   application.addElement(elemSequencer);
   application.addElement(gaussianSplatting);
-  application.addElement(std::make_shared<StereoHotkeysElement>(gaussianSplatting));
+  // Registered for every windowed run: stereo starts toggle instantly via the
+  // eye separation; mono starts enable stereo through a one-time rebuild.
+  if(!appInfo.headless)
+    application.addElement(std::make_shared<StereoHotkeysElement>(gaussianSplatting));
+  application.addElement(std::make_shared<ExitHotkeysElement>());
 
   auto elemCamera = std::make_shared<curved_stereo_gs::ElementCameraCustom>();
   elemCamera->setCameraManipulator(gaussianSplatting->cameraManip);
@@ -596,8 +734,8 @@ int main(int argc, char** argv)
   sideBySideOutput->enabled = stereoOutputMode == 2;
   if(activeStereoPresenterEnabled && stereoOutputMode != 2 && !appInfo.headless)
   {
-    application.setRenderWhileMinimized(true);
-    if(activeStereoOnlyWindow)
+    application.setRenderWhileMinimized(prmStereo.enabled && activeStereoOnlyWindow);
+    if(prmStereo.enabled && activeStereoOnlyWindow)
       application.setVsync(false);  // WGL SwapBuffers owns display pacing; avoid
                                     // a second hidden-window VSync.
 
@@ -627,8 +765,10 @@ int main(int argc, char** argv)
           const StereoPresentationSource source = gaussianSplatting->getStereoPresentationSource();
           if(sideBySideOutput->enabled)
           {
+            StereoFrameStats::beginFrame(StereoFrameStats::Path::kVulkanSideBySide, frameNumber);
             recordSideBySide(physicalDevice, cmd, source, swapchainImage, swapchainFormat, swapchainExtent,
                              *sideBySideOutput);
+            StereoFrameStats::endFrame(StereoFrameStats::Path::kVulkanSideBySide);
             return;
           }
           if(!stereoInterop->isAvailable() || source.image == VK_NULL_HANDLE || source.layerCount < StereoInteropVk::kEyeCount)
@@ -647,22 +787,50 @@ int main(int argc, char** argv)
             stereoInterop->disable();
         });
 
+    auto stereoPresentationWasEnabled = std::make_shared<bool>(prmStereo.enabled);
+    auto stereoPresenterWasActive     = std::make_shared<bool>(false);
     application.setQueueSubmitEndCallback([gaussianSplatting, activeStereoPresenter, stereoInterop, sideBySideOutput,
                                            stereoOutputMode, activeStereoOnlyWindow, mainWindowHidden,
+                                           stereoPresentationWasEnabled, stereoPresenterWasActive,
                                            originalVsync = appInfo.vSync, &application, leftRgba8 = std::vector<uint8_t>{},
-                                           rightRgba8 = std::vector<uint8_t>{}](uint64_t frameNumber) mutable {
+                                           rightRgba8 = std::vector<uint8_t>{}, benchmarkEnabled = benchmarkMode,
+                                           frameLimit = appInfo.headlessFrameCount,
+                                           stereoStatsFrames = uint64_t{0}](uint64_t frameNumber) mutable {
+      // Count every submitted frame regardless of the active stereo path: the
+      // mode-specific branches below return early.
+      if(frameLimit != 0 && frameLimit != UINT32_MAX && ++stereoStatsFrames >= frameLimit)
+        application.close();
       if(sideBySideOutput->enabled)
         return;
+
+      if(*stereoPresentationWasEnabled != prmStereo.enabled)
+      {
+        *stereoPresentationWasEnabled = prmStereo.enabled;
+        application.setRenderWhileMinimized(prmStereo.enabled && activeStereoOnlyWindow);
+        application.setVsync(prmStereo.enabled && activeStereoOnlyWindow ? false : originalVsync);
+      }
+
       if(!prmStereo.enabled || prmStereo.mode != STEREO_MODE_MULTIVIEW)
       {
-        activeStereoPresenter->deinit();
+        if(*stereoPresenterWasActive)
+        {
+          activeStereoPresenter->deinit();
+          *stereoPresenterWasActive = false;
+        }
+        if(*mainWindowHidden && application.getWindowHandle() != nullptr)
+        {
+          glfwShowWindow(application.getWindowHandle());
+          *mainWindowHidden = false;
+        }
         return;
       }
 
       bool presented = false;
       if(stereoInterop->hasProducedFrame(frameNumber))
       {
+        StereoFrameStats::beginFrame(StereoFrameStats::Path::kGpuInterop, frameNumber);
         presented = activeStereoPresenter->presentInterop(*stereoInterop, frameNumber);
+        StereoFrameStats::endFrame(StereoFrameStats::Path::kGpuInterop);
         if(!presented)
           stereoInterop->disable();
       }
@@ -670,12 +838,15 @@ int main(int argc, char** argv)
       if(!presented && !activeStereoPresenter->hasFailed())
       {
         VkExtent2D stereoSize{0, 0};
+        StereoFrameStats::beginFrame(StereoFrameStats::Path::kCpuReadback, frameNumber);
         presented = gaussianSplatting->readStereoPresentationImages(leftRgba8, rightRgba8, stereoSize)
                     && activeStereoPresenter->present(stereoSize, leftRgba8, rightRgba8);
+        StereoFrameStats::endFrame(StereoFrameStats::Path::kCpuReadback);
       }
 
       if(presented)
       {
+        *stereoPresenterWasActive = true;
         if(activeStereoOnlyWindow && !*mainWindowHidden && application.getWindowHandle() != nullptr)
         {
           glfwHideWindow(application.getWindowHandle());
@@ -707,11 +878,22 @@ int main(int argc, char** argv)
     application.setFrameGenerationCallback(
         [gaussianSplatting, sideBySideOutput,
          physicalDevice = appInfo.physicalDevice](VkCommandBuffer cmd, VkImage swapchainImage, VkImageView,
-                                                  VkFormat swapchainFormat, VkExtent2D swapchainExtent, uint64_t) {
+                                                  VkFormat swapchainFormat, VkExtent2D swapchainExtent, uint64_t frameNumber) {
           if(prmStereo.enabled && prmStereo.mode == STEREO_MODE_MULTIVIEW)
+          {
+            StereoFrameStats::beginFrame(StereoFrameStats::Path::kVulkanSideBySide, frameNumber);
             recordSideBySide(physicalDevice, cmd, gaussianSplatting->getStereoPresentationSource(), swapchainImage,
                              swapchainFormat, swapchainExtent, *sideBySideOutput);
+            StereoFrameStats::endFrame(StereoFrameStats::Path::kVulkanSideBySide);
+          }
         });
+    // The generic submit-end callback is not registered in this mode; keep the
+    // frame limit functional for side-by-side runs.
+    application.setQueueSubmitEndCallback([benchmarkEnabled = benchmarkMode, frameLimit = appInfo.headlessFrameCount,
+                                           stereoStatsFrames = uint64_t{0}, &application](uint64_t) mutable {
+      if(frameLimit != 0 && frameLimit != UINT32_MAX && ++stereoStatsFrames >= frameLimit)
+        application.close();
+    });
     LOGI("Vulkan side-by-side stereo selected; WGL quad-buffer is not required.\n");
   }
 
@@ -723,6 +905,9 @@ int main(int argc, char** argv)
 
   //
   application.run();
+
+  StereoFrameStats::logSummary("final");
+  StereoFrameStats::closeCsv();
 
   // Cleanup
   if(appInfo.device != VK_NULL_HANDLE)

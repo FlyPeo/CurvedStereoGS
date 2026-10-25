@@ -84,6 +84,7 @@
 #include "parameters.h"
 #include "ply_loader_async.h"
 #include "sky_sun_and_ibl.h"
+#include "dynamic_splat_sequence.h"
 #include "splat_set.h"
 #include "splat_set_vk.h"
 #include "splat_sorter_async.h"
@@ -125,6 +126,31 @@ public:
   // Camera manipulator
   // public so that it can be accessed by main
   std::shared_ptr<nvutils::CameraManipulator> cameraManip{};
+
+  // Dynamic 4DGS sequence (docs/dynamic-4dgs.md): opens lazily once the
+  // canonical scene is on the GPU; the animate pass runs before sorting.
+  void setDynamicSequencePath(const std::string& path)
+  {
+    m_dynamicSequencePath = path;
+    m_dynamicSequenceRequested = true;
+  }
+
+  // Use the selected Dynamic3DGaussians camera as the initial view when the
+  // renderer attaches. Users control the camera freely after initialization.
+  void setTrainingCameraMetadataPath(const std::string& path, uint32_t cameraIndex)
+  {
+    m_trainingCameraMetadataPath = path;
+    m_trainingCameraIndex        = cameraIndex;
+    m_trainingCameraRequested    = !path.empty();
+  }
+
+  // Invalidate the cached sorted splat order (sort re-runs on the next frame).
+  // Callers: splat-set loads and any event that changes splat positions outside
+  // the paths that already mark the order dirty internally.
+  void markSplatSortDirty() { m_sortDirty = true; }
+
+  // Attach the radial point-cloud-to-Gaussian reveal to a newly loaded asset.
+  void startSplatReveal(const std::shared_ptr<SplatSetVk>& splatSet);
 
 protected:
   GaussianSplatting(nvutils::ProfilerManager* profilerManager, nvutils::ParameterRegistry* parameterRegistry);
@@ -276,6 +302,22 @@ private:
   void updateSlangMacros(void);
 
   bool compileSlangShader(const std::string& filename, VkShaderModule& module);
+  // Disk cache for compiled SPIR-V: key = digest of all shader sources
+  // (covers every #include-able header in the shader dirs) + filename + macro
+  // set, so any source or mode change invalidates automatically. Cuts the
+  // per-launch Slang compilation (the startup white screen) down to file reads.
+  bool        tryLoadCachedSpirv(const std::string& filename, std::vector<uint32_t>& spirv);
+  void        storeCachedSpirv(const std::string& filename, const uint32_t* code, size_t byteSize);
+  void        ensureShaderSourceDigest();
+  std::string m_shaderCacheDigest;  // digest of all shader sources, computed lazily once
+  bool        m_shaderCacheDigestReady{false};
+  uint32_t    m_shaderCacheHits{0};
+  uint32_t    m_shaderCacheMisses{0};
+  // Set when onDetach started: processUpdateRequests() must then drop the
+  // pending shader-recompile request instead of rebuilding every pipeline for
+  // an application that is exiting anyway (that path wasted seconds at exit
+  // and crashed when combined with the SPIR-V cache).
+  bool m_shuttingDown{false};
 
   bool initShaders(void);
 
@@ -440,6 +482,31 @@ protected:
   bool m_pendingGBufferReinitSeen = false;  // Two-pass deferral (onUIRender runs before onPreRender)
   bool m_activeStereoMultiview    = false;  // Resource/pipeline mode currently safe to render with
 
+  // Steady-state frame timing, collected for benchmark comparisons and logged
+  // at detach (startup/shader-compilation time is excluded by construction).
+  std::chrono::steady_clock::time_point m_frameStatLast{};
+  std::vector<float>                    m_frameStatMs{};
+
+  // Sorted-splat-order cache validity (see renderHybridPipeline): the sort key
+  // derives from frameInfo.viewMatrix + projection, so the order only changes
+  // when the camera moves, splat positions change (dynamic sequence, loads,
+  // gizmo drags), or opacity culling toggles.
+  bool      m_sortDirty{true};
+  std::chrono::steady_clock::time_point m_splatRevealLastClockUpdate{std::chrono::steady_clock::now()};
+  float     m_splatRevealClock{0.0F};
+  float     m_splatRevealEndTime{0.0F};
+  glm::mat4 m_lastSortViewMatrix{0.0F};
+  double    m_lastSortFov{-1.0};
+  bool      m_lastSortOpacityDisabled{false};
+
+  // Last dispatched dynamic-sequence blend parameters: an identical blend
+  // produces identical buffer contents, so the dispatch (and the sort
+  // invalidation it triggers) can be skipped.
+  uint32_t m_lastAnimateCount{0};
+  uint32_t m_lastAnimateKey0{0};
+  uint32_t m_lastAnimateKey1{0};
+  float    m_lastAnimateAlpha{-1.0F};
+
   nvapp::Application*         m_app{nullptr};
   nvutils::ProfilerManager*   m_profilerManager;
   nvutils::ParameterRegistry* m_parameterRegistry;
@@ -510,6 +577,7 @@ protected:
     VkShaderModule meshShader{};
     VkShaderModule vertexShader{};
     VkShaderModule fragmentShader{};
+    VkShaderModule animateShader{};  // dynamic 4DGS animate pass (docs/dynamic-4dgs.md)
     VkShaderModule threedgutMeshShader{};
     VkShaderModule threedgutFragmentShader{};
     // 3D Meshes raster
@@ -601,6 +669,34 @@ protected:
   VkDescriptorSetLayout    m_descriptorSetLayoutPostProcess = VK_NULL_HANDLE;
   VkDescriptorSet          m_descriptorSetPostProcess       = VK_NULL_HANDLE;
   VkDescriptorPool         m_descriptorPoolPostProcess      = VK_NULL_HANDLE;
+
+  ///////////////////////////////
+  // Dynamic 4DGS sequence (docs/dynamic-4dgs.md)
+
+  DynamicSplatSequence       m_dynamicSequence;                        // asset + VRAM keyframe pool + clock
+  std::string                m_dynamicSequencePath;                    // requested .dgs (empty = none)
+  bool                       m_dynamicSequenceRequested = false;
+  bool                       m_dynamicSequenceOpen      = false;
+  double                     m_sequenceStartSeconds     = 0.0;         // wall-clock at open
+  VkCommandPool              m_dynamicCommandPool       = VK_NULL_HANDLE;
+
+  std::string                m_trainingCameraMetadataPath;
+  uint32_t                   m_trainingCameraIndex      = 0;
+  bool                       m_trainingCameraRequested  = false;
+
+  nvvk::DescriptorBindings m_descriptorBindingsAnimate = {};
+  VkDescriptorSetLayout    m_descriptorSetLayoutAnimate = VK_NULL_HANDLE;
+  VkDescriptorPool         m_descriptorPoolAnimate      = VK_NULL_HANDLE;
+  VkDescriptorSet          m_descriptorSetAnimate       = VK_NULL_HANDLE;
+  VkPipelineLayout         m_pipelineLayoutAnimate      = VK_NULL_HANDLE;
+  VkPipeline               m_computePipelineAnimate     = VK_NULL_HANDLE;
+  uint32_t                 m_dynamicFrameId             = 0;  // onRender invocations since attach
+
+  bool openDynamicSequence();
+  void initializeTrainingCamera();
+  void destroyDynamicAnimate();
+  void initDynamicAnimate();
+  void animateDynamicSplats(VkCommandBuffer cmd, uint32_t splatCount);
 
   ///////////////////////////////
   // DLSS

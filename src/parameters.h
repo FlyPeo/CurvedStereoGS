@@ -179,8 +179,11 @@ struct RenderParameters
   int32_t     lightingEnabled = LIGHTING_DISABLED;              // Enable lighting for all models
   ShadowsMode shadowsMode     = ShadowsMode::eShadowsDisabled;  // Shadows mode for all models (RTX only)
 
-  // Color buffer format
-  VkFormat colorFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+  // Color buffer format. R16G16B16A16 halves the dominant full-screen
+  // bandwidth (splat raster write + warp read + history read-modify-write)
+  // versus R32G32B32A32; HDR headroom (65504) and a 2^-11 relative mantissa
+  // are ample for display output. Raise to 32F only for precise capture.
+  VkFormat colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
 
   // Clay visualization color (used when visualize == VISUALIZE_CLAY)
   glm::vec3 clayColor = glm::vec3(0.423, 0.337, 0.251);

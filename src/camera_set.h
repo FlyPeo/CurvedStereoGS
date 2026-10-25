@@ -21,9 +21,13 @@
 #define _CAMERA_SET_H_
 
 #include <string>
+#include <fstream>
+#include <algorithm>
+#include <cmath>
 #include <vector>
 
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_inverse.hpp>
 
 #include <tinygltf/json.hpp>
 
@@ -220,6 +224,96 @@ private:
     };
   }
 };
+
+// Load the selected camera's per-timestep calibration from the Dynamic3DGaussians
+// train_meta.json format. Camera poses in that dataset use the OpenCV convention
+// (+X right, +Y down, +Z forward); CameraManipulator expects a right-handed view
+// looking down -Z, so convert the camera up/forward axes while preserving the
+// dataset world-space position.
+inline bool loadDynamic3GSTrainingCameraTrack(const std::string& filename, uint32_t cameraIndex,
+                                              std::vector<Camera>& cameras, std::string* error = nullptr)
+{
+  using nlohmann::json;
+
+  cameras.clear();
+  try
+  {
+    std::ifstream input(filename);
+    if(!input.is_open())
+    {
+      if(error)
+        *error = "could not open metadata file";
+      return false;
+    }
+
+    const json metadata = json::parse(input);
+    const auto&        w2cFrames = metadata.at("w2c");
+    const auto&        intrinsics = metadata.at("k");
+    const uint32_t     width = metadata.at("w").get<uint32_t>();
+    const uint32_t     height = metadata.at("h").get<uint32_t>();
+    const size_t       frameCount = std::min(w2cFrames.size(), intrinsics.size());
+    if(width == 0 || height == 0 || frameCount == 0)
+    {
+      if(error)
+        *error = "metadata has no valid frames or image dimensions";
+      return false;
+    }
+
+    cameras.reserve(frameCount);
+    for(size_t frame = 0; frame < frameCount; ++frame)
+    {
+      const auto& w2c = w2cFrames.at(frame).at(cameraIndex);
+      const auto& k   = intrinsics.at(frame).at(cameraIndex);
+      if(w2c.size() != 4 || k.size() < 2 || w2c.at(0).size() != 4 || k.at(0).size() < 3
+         || w2c.at(1).size() != 4 || k.at(1).size() < 3 || w2c.at(2).size() != 4 || w2c.at(3).size() != 4)
+      {
+        if(error)
+          *error = "metadata camera matrix or intrinsics have an unexpected shape";
+        cameras.clear();
+        return false;
+      }
+
+      glm::mat4 worldToCamera(1.0F);
+      for(glm::length_t row = 0; row < 4; ++row)
+        for(glm::length_t column = 0; column < 4; ++column)
+          worldToCamera[column][row] = w2c.at(size_t(row)).at(size_t(column)).get<float>();
+
+      const glm::mat4 cameraToWorld = glm::inverse(worldToCamera);
+      // The Gaussian asset importer converts world coordinates from RDF to
+      // RUB (x, -y, -z); apply the same basis change to the camera pose.
+      const glm::vec3 rdfToRub(1.0F, -1.0F, -1.0F);
+      const glm::vec3 eye     = glm::vec3(cameraToWorld[3]) * rdfToRub;
+      const glm::vec3 rawForward = glm::vec3(cameraToWorld[2]) * rdfToRub;
+      const glm::vec3 rawUp      = -glm::vec3(cameraToWorld[1]) * rdfToRub;
+      const float     fy      = k.at(1).at(1).get<float>();
+      const float forwardLength = glm::length(rawForward);
+      const float upLength      = glm::length(rawUp);
+      if(!std::isfinite(fy) || fy <= 0.0F || !std::isfinite(forwardLength) || forwardLength < 1.0e-5F
+         || !std::isfinite(upLength) || upLength < 1.0e-5F)
+      {
+        if(error)
+          *error = "metadata contains an invalid camera pose or focal length";
+        cameras.clear();
+        return false;
+      }
+
+      Camera camera;
+      camera.eye = eye;
+      camera.ctr = eye + rawForward / forwardLength;
+      camera.up  = rawUp / upLength;
+      camera.fov = glm::degrees(2.0F * std::atan(float(height) / (2.0F * fy)));
+      cameras.push_back(camera);
+    }
+    return true;
+  }
+  catch(const std::exception& exception)
+  {
+    cameras.clear();
+    if(error)
+      *error = exception.what();
+    return false;
+  }
+}
 
 /////////// Utility function to import cameras from INRIA json files
 

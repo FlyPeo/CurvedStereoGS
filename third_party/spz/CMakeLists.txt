@@ -25,8 +25,20 @@ add_library(spz STATIC ${spz_sources} ${spz_headers} )
 add_library(spz::spz ALIAS spz)
 
 # The upgraded spz (SPZ header version 4+) also needs zstd for compression.
-# Reuse the zstd target provided by nvpro_core2 (its INTERFACE include dir brings in zstd.h)
-# instead of letting spz FetchContent its own copy, which collides with nvpro_core2's targets.
+# nvpro_core2's vendored zstd was removed in its latest slim-down, so fetch our
+# own copy when no libzstd_static target exists (the collision the old comment
+# warned about is gone with the vendored copy).
+if(NOT TARGET libzstd_static)
+  include(FetchContent)
+  set(ZSTD_BUILD_SHARED OFF)
+  set(ZSTD_BUILD_PROGRAMS OFF)
+  set(ZSTD_BUILD_TESTS OFF)
+  set(ZSTD_LEGACY_SUPPORT OFF)
+  FetchContent_Declare(zstd
+    URL https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+    SOURCE_SUBDIR build/cmake)  # zstd's CMake entry lives here, not at the archive root
+  FetchContent_MakeAvailable(zstd)
+endif()
 target_link_libraries(spz PRIVATE zlib libzstd_static)
 
 target_include_directories(spz
